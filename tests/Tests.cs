@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
@@ -27,7 +27,7 @@ namespace ZapretDesktop {
                 var root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".."));
                 var local = Path.GetFullPath(Path.Combine(root, "..", "zapret-discord-youtube-1.10.2"));
                 var official = Path.Combine(root, "downloads", "official-1.10.3", "zapret-discord-youtube-1.10.3");
-                if(!Directory.Exists(local))local=official; SelectionTests().GetAwaiter().GetResult();
+                if(!Directory.Exists(local))local=official; SelectionTests().GetAwaiter().GetResult(); ShellReplacementTest(root);
                 foreach (var engine in new[] {local, official}.Distinct()) {
                     Strategy.ValidateEngine(engine);
                     var profiles = Directory.GetFiles(engine, "general*.bat"); Assert(profiles.Length == 22, "22 upstream profiles expected");
@@ -113,6 +113,27 @@ namespace ZapretDesktop {
                 Console.WriteLine("PASS: " + count + " checks"); return 0;
             } catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
         }
+        static void ShellReplacementTest(string root) {
+            var folder=Path.Combine(root,"tests","fixture-update-"+Guid.NewGuid().ToString("N"));
+            var stage=Path.Combine(folder,"data","app-updates","probe");Directory.CreateDirectory(stage);
+            try {
+                var source=Path.Combine(stage,"Obhod.exe");var target=Path.Combine(folder,"Obhod.exe");
+                File.Copy(Path.Combine(root,"tests","Obhod-probe.exe"),source);
+                File.WriteAllText(source+".config","<?xml version=\"1.0\"?><configuration><startup><supportedRuntime version=\"v4.0\"/></startup></configuration>");
+                File.WriteAllText(Path.Combine(stage,"verified.sha256"),Updater.Hash(source));File.WriteAllText(Path.Combine(stage,"config.sha256"),Updater.Hash(source+".config"));
+                File.WriteAllText(Path.Combine(stage,"version.txt"),ShellUpdates.Current);
+                File.WriteAllText(target,"previous executable");File.WriteAllText(target+".config","previous config");
+                string settings=Path.Combine(folder,"data","settings.json");File.WriteAllText(settings,"preserved settings");
+                using(var helper=Process.Start(new ProcessStartInfo(source,"--apply-update 2147483647 "+Strategy.Quote(target)){UseShellExecute=false,CreateNoWindow=true})) {
+                    Assert(helper.WaitForExit(10000),"Shell update helper exits after replacing and restarting");
+                }
+                var watch=Stopwatch.StartNew();while(!File.Exists(Path.Combine(folder,"updated.txt")) && watch.ElapsedMilliseconds<5000)Thread.Sleep(20);
+                Assert(File.Exists(Path.Combine(folder,"updated.txt")),"Updated shell is restarted");
+                Assert(Updater.Hash(source)==Updater.Hash(target),"Exact verified executable installed");
+                Assert(File.ReadAllText(target+".previous")=="previous executable" && File.ReadAllText(target+".config.previous")=="previous config","Old executable and configuration backed up");
+                Assert(File.ReadAllText(settings)=="preserved settings","Shell update does not overwrite user settings");
+            } finally {Directory.Delete(folder,true);}
+        }
         static async Task SelectionTests() {
             string running=null; int checks=0; var started=new System.Collections.Generic.List<string>();
             Func<int,long,CheckResult[]> results=(passed,ms)=>Enumerable.Range(0,5).Select(i=>new CheckResult{State=i<passed?1:0,Detail="fixture",Milliseconds=ms}).ToArray();
@@ -165,6 +186,21 @@ namespace ZapretDesktop {
                 Assert(File.ReadAllText(Path.Combine(store.Current, "lists", "list-general-user.txt")) == "my-service.example\n", "User list survives real update");
                 updater.Rollback(); Assert(Updater.Version(store.Current) == "1.10.2", "Rollback after real update");
             }
+            using(var shell=new ShellUpdates()) {
+                Assert(await shell.Check()==null,"Installed shell version matches latest published release");
+                using(var client=new System.Net.Http.HttpClient()) {
+                    client.DefaultRequestHeaders.UserAgent.ParseAdd("Obhod-Test/"+ShellUpdates.Current);
+                    var json=await client.GetStringAsync("https://api.github.com/repos/"+ShellUpdates.Repository+"/releases/latest");
+                    var data=new System.Web.Script.Serialization.JavaScriptSerializer().Deserialize<System.Collections.Generic.Dictionary<string,object>>(json);
+                    var asset=((System.Collections.ArrayList)data["assets"]).Cast<System.Collections.Generic.Dictionary<string,object>>().First(x=>Convert.ToString(x["name"])=="Obhod-"+ShellUpdates.Current+"-win-x64.zip");
+                    var release=new Release{Version=ShellUpdates.Current,Url=Convert.ToString(asset["browser_download_url"]),Size=Convert.ToInt64(asset["size"]),Digest=Convert.ToString(asset["digest"])};
+                    var settings=Path.Combine(store.Root,"data","settings.json");var before=Updater.Hash(settings);
+                    var prepared=await shell.Stage(release,store.Root);
+                    Assert(File.Exists(prepared) && File.Exists(prepared+".config"),"Published shell ZIP downloaded, hashed and staged");
+                    ShellUpdates.ValidateBinary(prepared,ShellUpdates.Current);count++;
+                    Assert(Updater.Hash(settings)==before,"Real shell download preserves existing settings");
+                }
+            }
             foreach (var target in ServiceChecks.Targets) {
                 var result = await ServiceChecks.Run(target, CancellationToken.None);
                 Console.WriteLine(target.Name + ": " + result.Detail + " (" + result.Milliseconds + " ms)");
@@ -173,3 +209,5 @@ namespace ZapretDesktop {
         }
     }
 }
+
+
