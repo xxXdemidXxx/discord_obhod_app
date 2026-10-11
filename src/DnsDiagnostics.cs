@@ -1,0 +1,48 @@
+﻿using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Linq;
+using System.Net;
+using System.Net.Http;
+using System.Net.NetworkInformation;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Web.Script.Serialization;
+
+namespace ZapretDesktop {
+    public static class DnsDiagnostics {
+        static void ObserveFault(Task task) { task.ContinueWith(t=>{var ignored=t.Exception;},TaskContinuationOptions.OnlyOnFaulted); }
+        public static async Task<string> Run(CancellationToken token) {
+            var report=new StringBuilder("DNS для www.youtube.com\r\n\r\n");
+            foreach(var adapter in NetworkInterface.GetAllNetworkInterfaces().Where(x=>x.OperationalStatus==OperationalStatus.Up && x.NetworkInterfaceType!=NetworkInterfaceType.Loopback)) {
+                try {report.AppendLine(adapter.Name+": DNS "+String.Join(", ",adapter.GetIPProperties().DnsAddresses.Select(x=>x.ToString())));} catch(NetworkInformationException){}
+            }
+            report.AppendLine(); bool systemOk=false,dohOk=false;
+            var lookup=Dns.GetHostAddressesAsync("www.youtube.com");
+            ObserveFault(lookup);
+            if(await Task.WhenAny(lookup,Task.Delay(5000,token))==lookup) {
+                try {var addresses=await lookup; systemOk=addresses.Length>0; report.AppendLine("DNS Windows: "+String.Join(", ",addresses.Select(x=>x.ToString()).Take(5)));}
+                catch(SocketException ex){report.AppendLine("DNS Windows: ошибка · "+ex.Message);}
+            } else report.AppendLine("DNS Windows: нет ответа за 5 секунд.");
+            token.ThrowIfCancellationRequested();
+            using(var handler=new HttpClientHandler{UseProxy=false}) using(var client=new HttpClient(handler){Timeout=TimeSpan.FromSeconds(7)}) {
+                try {
+                    using(var response=await client.GetAsync("https://dns.google/resolve?name=www.youtube.com&type=A",token)) {
+                        response.EnsureSuccessStatusCode(); var json=new JavaScriptSerializer().Deserialize<Dictionary<string,object>>(await response.Content.ReadAsStringAsync());
+                        dohOk=Convert.ToInt32(json["Status"])==0 && json.ContainsKey("Answer");
+                        report.AppendLine("Google DNS через HTTPS: "+(dohOk?"имя найдено":"имя не найдено"));
+                    }
+                } catch(Exception ex){if(token.IsCancellationRequested)throw new OperationCanceledException(token);report.AppendLine("Google DNS через HTTPS: "+ex.GetBaseException().Message);}
+            }
+            report.AppendLine();
+            if(!systemOk && dohOk) report.AppendLine("Windows не определяет имя, а Google DoH определяет. Проверьте DNS вашего сетевого подключения. Перебор DPI-стратегий сам по себе не гарантирует исправление DNS.");
+            else if(systemOk) report.AppendLine("Сейчас Windows определяет имя YouTube. Повторите HTTPS-проверку: ошибка могла быть временной. Если соединение не проходит, попробуйте автоподбор стратегий.");
+            else report.AppendLine("Имя не удалось проверить обоими способами. Проверьте интернет и DNS сетевого подключения.");
+            report.AppendLine("\r\nДля настройки DNS Windows откройте подключения: свойства Wi-Fi/Ethernet → IPv4 → DNS. Сначала сохраните прежние значения. Google Public DNS: 8.8.8.8 и 8.8.4.4. Возможность доступа зависит от сети.");
+            report.AppendLine("\r\nSecure DNS в браузере настраивается отдельно. Встроенные проверки приложения используют DNS Windows.");
+            return report.ToString();
+        }
+    }
+}

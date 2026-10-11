@@ -1,0 +1,12 @@
+dist/
+downloads/
+tests/*.exe
+tests/*.png
+tests/fixture-*/
+tools/*.exe
+releases/
+
+discord_obhod_app/
+*.zip
+*.tmp
+
