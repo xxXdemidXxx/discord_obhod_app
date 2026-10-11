@@ -27,7 +27,7 @@ namespace ZapretDesktop {
                 var root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".."));
                 var local = Path.GetFullPath(Path.Combine(root, "..", "zapret-discord-youtube-1.10.2"));
                 var official = Path.Combine(root, "downloads", "official-1.10.3", "zapret-discord-youtube-1.10.3");
-                if(!Directory.Exists(local))local=official; SelectionTests().GetAwaiter().GetResult(); DomainTests(root); UpdateFeedTests().GetAwaiter().GetResult(); ShellReplacementTest(root);
+                if(!Directory.Exists(local))local=official; SelectionTests().GetAwaiter().GetResult(); DomainTests(root); UpdateFeedTests().GetAwaiter().GetResult(); AppUpdateSessionTests(root).GetAwaiter().GetResult(); StageTests(root).GetAwaiter().GetResult(); ShellReplacementTest(root); ShellRollbackTest(root); ShellHandshakeTest(root);
                 foreach (var engine in new[] {local, official}.Distinct()) {
                     Strategy.ValidateEngine(engine);
                     var profiles = Directory.GetFiles(engine, "general*.bat"); Assert(profiles.Length == 22, "22 upstream profiles expected");
@@ -102,7 +102,7 @@ namespace ZapretDesktop {
                             pages.SelectedIndex = 0;
                         }
                         using (var image = new Bitmap(form.Width, form.Height)) { form.DrawToBitmap(image, new Rectangle(Point.Empty, form.Size)); image.Save(Path.Combine(root, "tests", "window.png")); }
-                        Assert(form.Controls.Count > 0, "Desktop UI constructed and rendered"); InteractiveUiChecks(form,root); ResponsiveScreens(form,root);
+                        Assert(form.Controls.Count > 0, "Desktop UI constructed and rendered"); InteractiveUiChecks(form,root); ResponsiveScreens(form,root); AppUpdateUiTests(store,root); AppUpdateOutcomeUiTests(store);
                         var tabs = FindTabs(form);
                         for (int i = 1; i < tabs.TabPages.Count; i++) {
                             tabs.SelectedIndex = i; form.PerformLayout(); Application.DoEvents();
@@ -125,7 +125,8 @@ namespace ZapretDesktop {
         sealed class MockHttp : System.Net.Http.HttpMessageHandler {
             public int Calls;public readonly System.Collections.Generic.List<string> Urls=new System.Collections.Generic.List<string>();
             public Func<string,System.Net.Http.HttpResponseMessage> Reply;
-            protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(System.Net.Http.HttpRequestMessage request,CancellationToken token){Calls++;Urls.Add(request.RequestUri.AbsoluteUri);return Task.FromResult(Reply(request.RequestUri.AbsoluteUri));}
+            public Func<string,CancellationToken,Task<System.Net.Http.HttpResponseMessage>> AsyncReply;
+            protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(System.Net.Http.HttpRequestMessage request,CancellationToken token){Calls++;Urls.Add(request.RequestUri.AbsoluteUri);return AsyncReply==null?Task.FromResult(Reply(request.RequestUri.AbsoluteUri)):AsyncReply(request.RequestUri.AbsoluteUri,token);}
         }
         static string Feed(string version){return new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(new{tag_name="v"+version,draft=false,prerelease=false,assets=new[]{new{name="Obhod-"+version+"-win-x64.zip",browser_download_url="https://github.com/"+ShellUpdates.Repository+"/releases/download/v"+version+"/Obhod-"+version+"-win-x64.zip",digest="sha256:"+new string('a',64),size=123}}});}
         static System.Net.Http.HttpResponseMessage Response(int status,string text){return new System.Net.Http.HttpResponseMessage((System.Net.HttpStatusCode)status){Content=new System.Net.Http.StringContent(text)};}
@@ -141,6 +142,127 @@ namespace ZapretDesktop {
             http=new MockHttp{Reply=url=>Response(200,new string('a',1024*1024+1))};
             using(var client=new System.Net.Http.HttpClient(http)){bool rejected=false;try{await GitHubMetadata.Get(client,"https://github.com/test/oversized");}catch(InvalidDataException){rejected=true;}Assert(rejected,"Oversized release metadata rejected");}
             Assert(ServiceChecks.Targets.Last().Url.StartsWith("https://github.com/"),"Strategy probes check GitHub availability without consuming API quota");
+        }
+        sealed class ImmediateProgress : IProgress<int> {
+            public Action<int> Changed;
+            public void Report(int value){Changed(value);}
+        }
+        static async Task AppUpdateSessionTests(string root){
+            string folder=Path.Combine(root,"tests","fixture-session-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(Path.Combine(folder,"data"));
+            string settings=Path.Combine(folder,"data","settings.json");File.WriteAllText(settings,"untouched");
+            var http=new MockHttp{Reply=url=>url.EndsWith("update.json")?Response(200,Feed("99.0.0")):Response(200,new string('x',123))};
+            try{
+                using(var session=new AppUpdateSession(new ShellUpdates(http))){
+                    Assert(session.ActionText=="Проверить обновления","Idle updater offers one check action");
+                    await session.Check();
+                    Assert(http.Calls==1 && session.State==AppUpdateState.Available && session.ActionText=="Обновить" && session.Prepared==null,"Checking discovers a release without downloading or installing");
+                    Assert(!await session.Prepare(folder) && session.State==AppUpdateState.Failed && session.ActionText=="Повторить обновление","Bad archive leaves an inline retryable update state");
+                    Assert(!Directory.EnumerateDirectories(Path.Combine(folder,"data","app-updates")).Any() && File.ReadAllText(settings)=="untouched","Failed download removes its staging directory and preserves settings");
+                    Assert(!await session.Prepare(folder) && http.Calls==3,"Install retry reuses checked release and downloads again");
+                    http.Reply=url=>{session.Cancel();return Response(200,new string('x',123));};
+                    Assert(!await session.Prepare(folder) && session.State==AppUpdateState.Available && session.ActionText=="Обновить","Cancellation returns to the available update without losing it");
+                    http.Reply=url=>Response(200,Feed(ShellUpdates.Current));await session.Check();
+                    Assert(session.State==AppUpdateState.Current && session.Release==null && session.Prepared==null,"A fresh check clears an outdated candidate");
+                    session.Complete();Assert(session.Message.Contains(ShellUpdates.Current),"Installed version is shown without another network request");
+                }
+                http=new MockHttp{Reply=url=>Response(500,"Unavailable")};
+                using(var session=new AppUpdateSession(new ShellUpdates(http))){await session.Check();Assert(session.State==AppUpdateState.Failed && session.ActionText=="Повторить проверку","Check failure offers a distinct check retry");http.Reply=url=>Response(200,Feed(ShellUpdates.Current));await session.Check();Assert(session.State==AppUpdateState.Current,"Check retry recovers in the same view");}
+            }finally{Directory.Delete(folder,true);}
+        }
+        static async Task StageTests(string root){
+            string folder=Path.Combine(root,"tests","fixture-stage-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(folder);
+            string archive=Path.Combine(folder,"source.zip");
+            try{
+                using(var zip=ZipFile.Open(archive,ZipArchiveMode.Create)){
+                    zip.CreateEntryFromFile(Path.Combine(root,"tests","Obhod-probe.exe"),"Obhod/Obhod.exe");
+                    using(var text=new StreamWriter(zip.CreateEntry("Obhod/Obhod.exe.config").Open()))text.Write("<configuration/>");
+                    byte[] bytes=new byte[250000];new Random(42).NextBytes(bytes);using(var stream=zip.CreateEntry("Obhod/unused.bin").Open())stream.Write(bytes,0,bytes.Length);
+                }
+                byte[] content=File.ReadAllBytes(archive);
+                var release=new Release{Version=ShellUpdates.Current,Url="https://github.com/test/archive.zip",Size=content.Length,Digest="sha256:"+Updater.Hash(archive)};
+                var http=new MockHttp{Reply=url=>new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK){Content=new System.Net.Http.ByteArrayContent(content)}};
+                using(var updater=new ShellUpdates(http)){
+                    int previous=0,reports=0;
+                    var prepared=await updater.Stage(release,folder,new ImmediateProgress{Changed=value=>{Assert(value>=previous && value<=100,"Download progress is bounded and monotonic");previous=value;reports++;}},CancellationToken.None);
+                    Assert(reports>1 && previous==100 && File.Exists(prepared) && !File.Exists(Path.Combine(Path.GetDirectoryName(prepared),"unused.bin")),"Verified update stages only the application with complete progress");
+                    ShellUpdates.ValidateBinary(prepared,ShellUpdates.Current);
+                    using(var cancellation=new CancellationTokenSource()){
+                        cancellation.Cancel();bool cancelled=false;int calls=http.Calls;
+                        try{await updater.Stage(release,folder,null,cancellation.Token);}catch(OperationCanceledException){cancelled=true;}
+                        Assert(cancelled && http.Calls==calls,"Already cancelled install makes no download request");
+                    }
+                    int stages=Directory.GetDirectories(Path.Combine(folder,"data","app-updates")).Length;
+                    using(var cancellation=new CancellationTokenSource()){
+                        bool cancelled=false;try{await updater.Stage(release,folder,new ImmediateProgress{Changed=value=>cancellation.Cancel()},cancellation.Token);}catch(OperationCanceledException){cancelled=true;}
+                        Assert(cancelled && Directory.GetDirectories(Path.Combine(folder,"data","app-updates")).Length==stages,"Cancellation during download removes the incomplete stage");
+                    }
+                    File.AppendAllText(prepared,"tampered");
+                    bool refused=false;try{await ShellUpdates.Launch(prepared,Path.Combine(folder,"Obhod.exe"),false);}catch(InvalidDataException){refused=true;}
+                    Assert(refused,"Changed prepared binary is rejected before starting a helper or stopping the application");
+                }
+            }finally{Directory.Delete(folder,true);}
+        }
+        static void Pump(Task task){
+            var watch=Stopwatch.StartNew();while(!task.IsCompleted && watch.ElapsedMilliseconds<15000){Application.DoEvents();Thread.Sleep(10);}Assert(task.IsCompleted,"Update action finishes without a modal dialog");task.GetAwaiter().GetResult();Application.DoEvents();
+        }
+        static Task UpdateClick(MainForm form){return (Task)typeof(MainForm).GetMethod("AppUpdateAction",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).Invoke(form,null);}
+        static void Capture(Form form,string path){form.PerformLayout();Application.DoEvents();using(var image=new Bitmap(form.Width,form.Height)){form.DrawToBitmap(image,new Rectangle(Point.Empty,form.Size));image.Save(path);}}
+        static void AppUpdateUiTests(Store store,string root){
+            var http=new MockHttp{Reply=url=>Response(200,Feed("99.0.0"))};
+            using(var form=new MainForm(store,false,false,false,false,new ShellUpdates(http))){
+                form.StartPosition=FormStartPosition.Manual;form.Location=new Point(-2500,-2500);form.Show();Application.DoEvents();SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());var tabs=FindTabs(form);tabs.SelectedIndex=2;
+                var card=AllControls(form).OfType<AppUpdateCard>().Single();
+                Assert(card.Action.Text=="Проверить обновления" && card.Action.Enabled && AllControls(card).OfType<Button>().Count(x=>x.Visible)==1,"Updates view starts with exactly one visible action");
+                Capture(form,Path.Combine(root,"tests","window-updates-idle.png"));
+                Pump(UpdateClick(form));Assert(card.Action.Text=="Обновить" && http.Calls==1,"Native update button changes to install without downloading");
+                Capture(form,Path.Combine(root,"tests","window-updates-available.png"));
+                http.AsyncReply=async(url,token)=>{await Task.Delay(1000,token);return Response(200,new string('x',123));};
+                var pending=UpdateClick(form);Application.DoEvents();
+                Assert(card.Progress.Visible && card.Cancel.Visible && !card.Action.Enabled,"Loading displays progress and cancellation and prevents duplicate installs");
+                Capture(form,Path.Combine(root,"tests","window-updates-progress.png"));card.Cancel.PerformClick();Pump(pending);
+                Assert(card.Action.Text=="Обновить" && card.Action.Enabled && !card.Progress.Visible,"Cancellation leaves the same window ready to install later");
+                http.AsyncReply=null;http.Reply=url=>Response(200,new string('x',123));Pump(UpdateClick(form));
+                Assert(card.Action.Text=="Повторить обновление" && card.Action.Enabled && Application.OpenForms.Count==2,"Failed installation stays inline and leaves the existing window usable");
+                Capture(form,Path.Combine(root,"tests","window-updates-error.png"));
+                foreach(var size in new[]{new Size(940,690),new Size(1400,960)}){form.Size=size;form.PerformLayout();Application.DoEvents();Assert(card.Action.Right<=card.Width && card.Startup.Bottom<=card.Height && card.Bottom<=card.Parent.Height,"Update actions fit resized window "+size);}
+                Capture(form,Path.Combine(root,"tests","window-updates-compact.png"));
+                var components=AllControls(form).OfType<Button>().Single(x=>x.Text.StartsWith("Компоненты обхода"));components.PerformClick();Application.DoEvents();
+                Assert(components.Parent.Bottom<=components.Parent.Parent.ClientSize.Height && AllControls(components.Parent).Where(x=>x.Visible && x!=components.Parent).All(x=>x.Bottom<=components.Parent.Height),"Expanded component controls fit the updates page without clipping: card "+components.Parent.Bounds+" page "+components.Parent.Parent.ClientSize+" children "+String.Join(",",AllControls(components.Parent).Where(x=>x.Visible).Select(x=>x.Text+":"+x.Bounds)));
+                Capture(form,Path.Combine(root,"tests","window-updates-components.png"));components.PerformClick();
+                http.Reply=url=>Response(200,Feed(ShellUpdates.Current));var session=(AppUpdateSession)typeof(MainForm).GetField("appUpdates",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).GetValue(form);Pump(session.Check());
+                Capture(form,Path.Combine(root,"tests","window-updates-current.png"));
+            }
+        }
+        static void AppUpdateOutcomeUiTests(Store store){
+            var serializer=new System.Web.Script.Serialization.JavaScriptSerializer();bool previous=store.Settings.AutoAppUpdates;
+            try{
+                store.Settings.AutoAppUpdates=true;
+                foreach(bool success in new[]{true,false}){
+                    File.WriteAllText(Path.Combine(store.Root,"data","app-update-result.json"),serializer.Serialize(new ShellUpdates.Outcome{Success=success,Version=ShellUpdates.Current,Error="fixture raw server error"}));
+                    var http=new MockHttp{Reply=url=>Response(500,"Unavailable")};
+                    using(var form=new MainForm(store,false,false,false,false,new ShellUpdates(http))){
+                        form.StartPosition=FormStartPosition.Manual;form.Location=new Point(-2500,-2500);form.Show();Application.DoEvents();
+                        Assert(FindTabs(form).SelectedIndex==2 && http.Calls==0,"Restart displays the update result without another automatic check");
+                        Assert(AllControls(form).OfType<Label>().Any(x=>success?x.Text=="Обновлено до версии "+ShellUpdates.Current:x.Text=="Обновление не установлено. Текущая версия сохранена.") && !AllControls(form).OfType<Label>().Any(x=>x.Text.Contains("fixture raw")),"Restart reports success or failure inline without technical error text");
+                        Assert(!File.Exists(Path.Combine(store.Root,"data","app-update-result.json")),"Restart outcome is consumed once");
+                    }
+                }
+            }finally{store.Settings.AutoAppUpdates=previous;}
+        }
+        static void ShellRollbackTest(string root){
+            string folder=Path.Combine(root,"tests","fixture-rollback-"+Guid.NewGuid().ToString("N")),stage=Path.Combine(folder,"data","app-updates","probe");Directory.CreateDirectory(stage);
+            try{
+                string source=Path.Combine(stage,"Obhod.exe"),target=Path.Combine(folder,"Obhod.exe");
+                File.Copy(Path.Combine(root,"tests","Obhod-probe.exe"),source);File.WriteAllText(source+".config","<configuration/>");
+                File.WriteAllText(Path.Combine(stage,"verified.sha256"),Updater.Hash(source));File.WriteAllText(Path.Combine(stage,"config.sha256"),Updater.Hash(source+".config"));File.WriteAllText(Path.Combine(stage,"version.txt"),ShellUpdates.Current);
+                File.Copy(source,target);using(var stream=new FileStream(target,FileMode.Append))stream.WriteByte(42);string oldHash=Updater.Hash(target);
+                File.WriteAllText(target+".config","<configuration/>");Directory.CreateDirectory(target+".config.new");
+                using(var helper=Process.Start(new ProcessStartInfo(source,"--apply-update 2147483647 "+Strategy.Quote(target)+" --connect"){UseShellExecute=false,CreateNoWindow=true})){bool exited=helper.WaitForExit(10000);if(!exited)helper.Kill();Assert(exited,"Failed helper exits without opening a warning dialog");}
+                var watch=Stopwatch.StartNew();while(!File.Exists(Path.Combine(folder,"updated.txt")) && watch.ElapsedMilliseconds<5000)Thread.Sleep(20);
+                Assert(Updater.Hash(target)==oldHash && File.ReadAllText(target+".config")=="<configuration/>","Failure after EXE replacement restores the old executable and config");
+                var outcome=ShellUpdates.TakeOutcome(folder);Assert(outcome!=null && !outcome.Success && !String.IsNullOrEmpty(outcome.Error),"Rollback leaves a result for inline reporting on restart");
+                Assert(File.Exists(Path.Combine(folder,"updated.txt")) && File.ReadAllText(Path.Combine(folder,"updated.txt")).Contains("--connect"),"Rolled back application restarts and restores its connection");
+            }finally{Directory.Delete(folder,true);}
         }
         static void InteractiveUiChecks(MainForm form,string root) {
             var tabs=FindTabs(form);tabs.SelectedIndex=0;var dashboard=AllControls(form).OfType<Dashboard>().Single();
@@ -191,15 +313,29 @@ namespace ZapretDesktop {
                 File.WriteAllText(Path.Combine(stage,"version.txt"),ShellUpdates.Current);
                 File.WriteAllText(target,"previous executable");File.WriteAllText(target+".config","previous config");
                 string settings=Path.Combine(folder,"data","settings.json");File.WriteAllText(settings,"preserved settings");
-                using(var helper=Process.Start(new ProcessStartInfo(source,"--apply-update 2147483647 "+Strategy.Quote(target)){UseShellExecute=false,CreateNoWindow=true})) {
+                using(var helper=Process.Start(new ProcessStartInfo(source,"--apply-update 2147483647 "+Strategy.Quote(target)+" --connect"){UseShellExecute=false,CreateNoWindow=true})) {
                     Assert(helper.WaitForExit(10000),"Shell update helper exits after replacing and restarting");
                 }
                 var watch=Stopwatch.StartNew();while(!File.Exists(Path.Combine(folder,"updated.txt")) && watch.ElapsedMilliseconds<5000)Thread.Sleep(20);
-                Assert(File.Exists(Path.Combine(folder,"updated.txt")),"Updated shell is restarted");
+                Assert(File.Exists(Path.Combine(folder,"updated.txt")) && File.ReadAllText(Path.Combine(folder,"updated.txt")).Contains("--connect"),"Updated shell is restarted with the previous connection");
+                var outcome=ShellUpdates.TakeOutcome(folder);Assert(outcome!=null && outcome.Success && outcome.Version==ShellUpdates.Current && ShellUpdates.TakeOutcome(folder)==null,"Successful update result consumed once by the main window");
                 Assert(Updater.Hash(source)==Updater.Hash(target),"Exact verified executable installed");
                 Assert(File.ReadAllText(target+".previous")=="previous executable" && File.ReadAllText(target+".config.previous")=="previous config","Old executable and configuration backed up");
                 Assert(File.ReadAllText(settings)=="preserved settings","Shell update does not overwrite user settings");
             } finally {Directory.Delete(folder,true);}
+        }
+        static void ShellHandshakeTest(string root){
+            string folder=Path.Combine(root,"tests","fixture-handshake-"+Guid.NewGuid().ToString("N")),stage=Path.Combine(folder,"data","app-updates","probe");Directory.CreateDirectory(stage);
+            try{
+                string source=Path.Combine(stage,"Obhod.exe"),target=Path.Combine(folder,"Obhod.exe");
+                File.Copy(Path.Combine(root,"tests","Obhod-probe.exe"),source);File.WriteAllText(source+".config","<configuration/>");
+                File.WriteAllText(Path.Combine(stage,"verified.sha256"),Updater.Hash(source));File.WriteAllText(Path.Combine(stage,"config.sha256"),Updater.Hash(source+".config"));File.WriteAllText(Path.Combine(stage,"version.txt"),ShellUpdates.Current);
+                File.WriteAllText(target,"still running");
+                using(var helper=Process.Start(new ProcessStartInfo(source,"--apply-update "+Process.GetCurrentProcess().Id+" "+Strategy.Quote(target)+" --ready"){UseShellExecute=false,CreateNoWindow=true})){
+                    try{var watch=Stopwatch.StartNew();while(!File.Exists(Path.Combine(stage,"helper-ready.txt")) && watch.ElapsedMilliseconds<5000 && !helper.HasExited)Thread.Sleep(20);Assert(File.Exists(Path.Combine(stage,"helper-ready.txt")) && !helper.HasExited && File.ReadAllText(target)=="still running","Validated helper acknowledges readiness and waits before replacing the running application");}
+                    finally{if(!helper.HasExited){helper.Kill();helper.WaitForExit(5000);}}
+                }
+            }finally{Directory.Delete(folder,true);}
         }
         static void DomainTests(string root) {
             string normalized=DomainLists.Normalize("Example.COM\nexample.com\nпример.рф\n# comment\n",0);

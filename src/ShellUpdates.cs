@@ -56,20 +56,31 @@ namespace ZapretDesktop {
             if(name.Name!="Obhod" && !name.Name.StartsWith("Obhod-",StringComparison.Ordinal))throw new InvalidDataException("Архив содержит другое приложение.");
             if(name.Version.ToString(3)!=version)throw new InvalidDataException("Версия EXE отличается от версии релиза.");
         }
-        public async Task<string> Stage(Release release,string root) {
+        public Task<string> Stage(Release release,string root) {return Stage(release,root,null,CancellationToken.None);}
+        public async Task<string> Stage(Release release,string root,IProgress<int> progress,CancellationToken token) {
+            using(var timeout=CancellationTokenSource.CreateLinkedTokenSource(token)) {
+                timeout.CancelAfter(TimeSpan.FromMinutes(3));
+                try{return await StageCore(release,root,progress,timeout.Token);}
+                catch(OperationCanceledException){token.ThrowIfCancellationRequested();throw new IOException("Загрузка обновления не ответила.");}
+            }
+        }
+        async Task<string> StageCore(Release release,string root,IProgress<int> progress,CancellationToken token) {
+            token.ThrowIfCancellationRequested();
             string stage=Path.Combine(root,"data","app-updates",Guid.NewGuid().ToString("N"));Directory.CreateDirectory(stage);
             try {
                 string zip=Path.Combine(stage,"update.zip");
-                using(var response=await client.GetAsync(release.Url,HttpCompletionOption.ResponseHeadersRead)) {
+                using(var response=await client.GetAsync(release.Url,HttpCompletionOption.ResponseHeadersRead,token)) {
                     response.EnsureSuccessStatusCode();
                     using(var input=await response.Content.ReadAsStreamAsync())using(var output=File.Create(zip)) {
-                        var buffer=new byte[81920];int read;long total=0;
-                        while((read=await input.ReadAsync(buffer,0,buffer.Length))>0){total+=read;if(total>release.Size)throw new InvalidDataException("Архив превышает объявленный размер.");await output.WriteAsync(buffer,0,read);}
+                        var buffer=new byte[81920];int read,lastPercent=-1;long total=0;
+                        while((read=await input.ReadAsync(buffer,0,buffer.Length,token))>0){total+=read;if(total>release.Size)throw new InvalidDataException("Архив превышает объявленный размер.");await output.WriteAsync(buffer,0,read,token);int percent=(int)(total*100/release.Size);if(progress!=null && percent!=lastPercent){lastPercent=percent;progress.Report(percent);}}
                         if(total!=release.Size)throw new InvalidDataException("Загрузка обновления неполная.");
                     }
                 }
+                token.ThrowIfCancellationRequested();
                 if(!String.Equals("sha256:"+Updater.Hash(zip),release.Digest,StringComparison.OrdinalIgnoreCase))throw new InvalidDataException("SHA-256 оболочки не совпадает.");
                 string unpacked=Path.Combine(stage,"unpacked");await Task.Run(()=>Updater.Extract(zip,unpacked));
+                token.ThrowIfCancellationRequested();
                 string executable=Path.Combine(unpacked,"Obhod","Obhod.exe");ValidateBinary(executable,release.Version);
                 // Only the shell is replaced. All settings and engine versions remain in place.
                 string prepared=Path.Combine(stage,"Obhod.exe");File.Copy(executable,prepared);
@@ -81,34 +92,81 @@ namespace ZapretDesktop {
                 return prepared;
             }catch{try{Directory.Delete(stage,true);}catch{}throw;}
         }
-        public static void Launch(string prepared,string target,bool reconnect) {
-            Process.Start(new ProcessStartInfo(prepared,"--apply-update "+Process.GetCurrentProcess().Id+" "+Strategy.Quote(target)+(reconnect?" --connect":"")){UseShellExecute=false,CreateNoWindow=true,WorkingDirectory=Path.GetDirectoryName(target)});
+        static string InstallationRoot(string prepared,string target) {
+            string root=Path.GetFullPath(Path.Combine(Path.GetDirectoryName(prepared),"..","..",".."));
+            target=Path.GetFullPath(target);
+            if(!String.Equals(Path.GetDirectoryName(target),root,StringComparison.OrdinalIgnoreCase) || !Path.GetFileName(target).StartsWith("Obhod",StringComparison.OrdinalIgnoreCase) || !Path.GetExtension(target).Equals(".exe",StringComparison.OrdinalIgnoreCase))throw new InvalidDataException("Неправильный путь установки приложения.");
+            return root;
+        }
+        static void ValidatePrepared(string source) {
+            string stage=Path.GetDirectoryName(source);
+            if(Updater.Hash(source)!=File.ReadAllText(Path.Combine(stage,"verified.sha256")).Trim())throw new InvalidDataException("Файлы обновления изменились после проверки.");
+            ValidateBinary(source,File.ReadAllText(Path.Combine(stage,"version.txt")).Trim());
+            if(Updater.Hash(source+".config")!=File.ReadAllText(Path.Combine(stage,"config.sha256")).Trim())throw new InvalidDataException("Конфигурация обновления изменилась после проверки.");
+        }
+        public static async Task Launch(string prepared,string target,bool reconnect) {
+            InstallationRoot(prepared,target);ValidatePrepared(prepared);
+            string ready=Path.Combine(Path.GetDirectoryName(prepared),"helper-ready.txt");
+            if(File.Exists(ready))File.Delete(ready);
+            using(var helper=Process.Start(new ProcessStartInfo(prepared,"--apply-update "+Process.GetCurrentProcess().Id+" "+Strategy.Quote(target)+(reconnect?" --connect":"")+" --ready"){UseShellExecute=false,CreateNoWindow=true,WorkingDirectory=Path.GetDirectoryName(target)})) {
+                var watch=Stopwatch.StartNew();
+                while(!File.Exists(ready)) {
+                    if(helper.HasExited)throw new IOException("Не удалось подготовить установку.");
+                    if(watch.ElapsedMilliseconds>10000){try{helper.Kill();}catch{}throw new IOException("Установка не ответила.");}
+                    await Task.Delay(50);
+                }
+            }
+        }
+        public sealed class Outcome {
+            public bool Success {get;set;}
+            public string Version {get;set;}
+            public string Error {get;set;}
+        }
+        static void WriteOutcome(string root,bool success,string error) {
+            var path=Path.Combine(root,"data","app-update-result.json");Directory.CreateDirectory(Path.GetDirectoryName(path));
+            var json=new JavaScriptSerializer().Serialize(new Outcome{Success=success,Version=Current,Error=error??""});
+            File.WriteAllText(path+".new",json);
+            if(File.Exists(path))File.Replace(path+".new",path,null);else File.Move(path+".new",path);
+        }
+        public static Outcome TakeOutcome(string root) {
+            string path=Path.Combine(root,"data","app-update-result.json");
+            try {
+                if(!File.Exists(path))return null;
+                if(new FileInfo(path).Length>8192){File.Delete(path);return null;}
+                var result=new JavaScriptSerializer().Deserialize<Outcome>(File.ReadAllText(path));File.Delete(path);return result;
+            }catch{return null;}
         }
         public static void Apply(string[] args) {
-            string target=null, backup=null;bool replaced=false,configReplaced=false;string configBackup=null;
+            string target=null,root=null,backup=null;bool replaced=false,configReplaced=false,configCreated=false;string configBackup=null;
+            bool handshake=args.Contains("--ready"),reconnect=args.Contains("--connect");int pid=0;
             try {
-                string stage=AppDomain.CurrentDomain.BaseDirectory;
-                string root=Path.GetFullPath(Path.Combine(stage,"..","..",".."));
-                target=Path.GetFullPath(args[2]);
-                if(!String.Equals(Path.GetDirectoryName(target),root,StringComparison.OrdinalIgnoreCase) || !Path.GetFileName(target).StartsWith("Obhod",StringComparison.OrdinalIgnoreCase) || Path.GetExtension(target)!=".exe")throw new InvalidDataException("Неправильный путь установки оболочки.");
-                string source=Application.ExecutablePath;
-                if(Updater.Hash(source)!=File.ReadAllText(Path.Combine(stage,"verified.sha256")).Trim())throw new InvalidDataException("Файлы обновления изменились после проверки.");
-                ValidateBinary(source,File.ReadAllText(Path.Combine(stage,"version.txt")).Trim());
-                if(Updater.Hash(source+".config")!=File.ReadAllText(Path.Combine(stage,"config.sha256")).Trim())throw new InvalidDataException("Конфигурация обновления изменилась после проверки.");
-                int pid=Int32.Parse(args[1]);
-                try {using(var old=Process.GetProcessById(pid)){if(!old.WaitForExit(30000))throw new IOException("Приложение не завершилось для обновления.");}}catch(ArgumentException){}
+                pid=Int32.Parse(args[1]);string source=Application.ExecutablePath;
+                root=InstallationRoot(source,args[2]);target=Path.GetFullPath(args[2]);ValidatePrepared(source);
+                if(handshake)File.WriteAllText(Path.Combine(Path.GetDirectoryName(source),"helper-ready.txt"),"ready");
+                WaitForExit(pid);
                 backup=target+".previous";configBackup=target+".config.previous";
                 var temp=target+".new";File.Copy(source,temp,true);
                 for(int attempt=0;;attempt++) {try{File.Replace(temp,target,backup,true);replaced=true;break;}catch(IOException){if(attempt>=30)throw;Thread.Sleep(200);}}
                 File.Copy(source+".config",target+".config.new",true);
                 if(File.Exists(target+".config")){File.Replace(target+".config.new",target+".config",configBackup,true);configReplaced=true;}
-                else File.Move(target+".config.new",target+".config");
-                Process.Start(new ProcessStartInfo(target,args.Contains("--connect")?"--connect":""){UseShellExecute=true,WorkingDirectory=root});
+                else {File.Move(target+".config.new",target+".config");configCreated=true;}
+                WriteOutcome(root,true,null);
+                Process.Start(new ProcessStartInfo(target,reconnect?"--connect":""){UseShellExecute=true,WorkingDirectory=root});
             }catch(Exception ex) {
-                try {if(configReplaced)File.Copy(configBackup,target+".config",true);if(replaced)File.Copy(backup,target,true);}catch{}
-                MessageBox.Show("Обновление оболочки не установлено.\n"+ex.Message,"Обход",MessageBoxButtons.OK,MessageBoxIcon.Warning);
-                if(target!=null && File.Exists(target))try{Process.Start(new ProcessStartInfo(target){UseShellExecute=true});}catch{}
+                try {if(configReplaced)File.Copy(configBackup,target+".config",true);else if(configCreated)File.Delete(target+".config");if(replaced)File.Copy(backup,target,true);}catch{}
+                // The existing application displays the result in its Updates tab.
+                // A helper must never open an error dialog or expose internal details.
+                bool parentAlive=false;try{using(var parent=Process.GetProcessById(pid))parentAlive=!parent.HasExited;}catch{}
+                if(root!=null && target!=null) {
+                    try{WriteOutcome(root,false,ex.Message);}catch{}
+                    if(!handshake || !parentAlive) {
+                        try{WaitForExit(pid);if(File.Exists(target))Process.Start(new ProcessStartInfo(target,reconnect?"--connect":""){UseShellExecute=true,WorkingDirectory=root});}catch{}
+                    }
+                }
             }
+        }
+        static void WaitForExit(int pid) {
+            try {using(var old=Process.GetProcessById(pid)){if(!old.WaitForExit(30000))throw new IOException("Приложение не завершилось для обновления.");}}catch(ArgumentException){}
         }
         public void Dispose(){client.Dispose();}
     }

@@ -40,28 +40,26 @@ namespace ZapretDesktop {
         Dashboard dashboard; bool scanning, dnsBusy, pendingExit, stopAfterScan;
         string activeStrategy,scanStep=""; int checkEpoch; Task manualCheckTask;
         CancellationTokenSource scanCancellation;
-        readonly ShellUpdates shellUpdates = new ShellUpdates();
-        Label shellText; Button shellInstall,shellManual,coreManual; CheckBox autoShell; string stagedShell; bool shellChecking;
+        readonly AppUpdateSession appUpdates;
+        AppUpdateCard appUpdateCard; Button coreManual; CheckBox autoShell; bool updateOutcome;
         bool previouslyOn;
         CancellationTokenSource checkCancellation; bool testing, checkingUpdates;
         NotifyIcon tray; System.Windows.Forms.Timer timer;
         Release release; bool busy, exiting, loading, elevation;
-        public MainForm(Store store, bool start, bool auto = false, bool restoreConnection = false, bool fullScan = false) {
-            this.store = store; updater = new Updater(store);
+        public MainForm(Store store, bool start, bool auto = false, bool restoreConnection = false, bool fullScan = false, ShellUpdates shellUpdates = null) {
+            this.store = store; updater = new Updater(store);appUpdates=new AppUpdateSession(shellUpdates??new ShellUpdates());
             activeStrategy = store.Settings.Strategy;
             BuildInterface();
             if(fullScan)dashboard.ScanMode.SelectedIndex=1;
             tray = new NotifyIcon { Icon = Icon, Text = "Обход — выключен", Visible = true };
             var menu = new ContextMenuStrip(); menu.Items.Add("Открыть", null, (s,e) => Restore()); menu.Items.Add("Включить / выключить", null, async (s,e) => await Toggle()); menu.Items.Add("Выход", null, (s,e) => Exit()); tray.ContextMenuStrip = menu; tray.DoubleClick += (s,e) => Restore();
-            runner.Log += Append; timer = new System.Windows.Forms.Timer { Interval = 800 }; timer.Tick += async (s,e) => {
-                RefreshState();
-                if(store.Settings.AutoAppUpdates && !shellChecking && !checkingUpdates && !busy && !starting && !scanning && !testing && !dnsBusy && !exiting) {
-                    if(stagedShell!=null && !runner.Running && !runner.Conflict && !domainEditor.Dirty) await ApplyShell();
-
-                }
-            }; timer.Start();
+            runner.Log += Append; timer = new System.Windows.Forms.Timer { Interval = 800 };
+            timer.Tick += (s,e) => RefreshState();timer.Start();
+            appUpdates.Changed+=AppUpdateChanged;
             LoadSettings();
-            Shown += async (s,e) => {Append("Обход "+ShellUpdates.Current+". Ядро "+Updater.Version(store.Current));if(auto)await AutoSelect(restoreConnection);else if(start)await ApplyStrategy();if(!IsDisposed && store.Settings.AutoAppUpdates)await CheckShell(true);if(!IsDisposed && store.Settings.CheckUpdates)await CheckUpdates(true);};
+            var outcome=ShellUpdates.TakeOutcome(store.Root);updateOutcome=outcome!=null;
+            if(outcome!=null){if(outcome.Success && outcome.Version==ShellUpdates.Current)appUpdates.Complete();else {appUpdates.Fail("Обновление не установлено. Текущая версия сохранена.");Append("Установка обновления: "+outcome.Error);}tabs.SelectedIndex=2;}
+            Shown += async (s,e) => {Append("Обход "+ShellUpdates.Current+". Ядро "+Updater.Version(store.Current));if(auto)await AutoSelect(restoreConnection);else if(start)await ApplyStrategy();if(!IsDisposed && store.Settings.AutoAppUpdates && !updateOutcome)await CheckShell(true);if(!IsDisposed && store.Settings.CheckUpdates)await CheckUpdates(true);};
             FormClosing += (s,e) => { if (!exiting && e.CloseReason==CloseReason.UserClosing) { e.Cancel = true; Hide(); } };
         }
         Label Label(string text, float size, Color color, int x, int y, int width, int height) {
@@ -201,10 +199,10 @@ namespace ZapretDesktop {
         async Task CheckUpdates(bool quiet) {
             if (busy || scanning || checkingUpdates) return; checkingUpdates = true; RefreshState();
             try {
-                coreManual.Visible=false;updateText.Text = "Проверяем обновления…"; release = await updater.Check(); if(IsDisposed)return;
+                coreManual.Tag=null;updateText.Text = "Проверяем обновления…"; release = await updater.Check(); if(IsDisposed)return;
                 if (release.Version == Updater.Version(store.Current)) { updateText.Text = "Обновлений нет"; release = null; }
                 else { updateText.Text = "Доступна версия " + release.Version; Append("Доступно обновление ядра " + release.Version); }
-            } catch (Exception ex) { if(IsDisposed)return; coreManual.Visible=true;release = null; updateText.Text = ex is UpdateCheckException?ex.Message:"Не удалось проверить обновления. Попробуйте позже."; Append("Проверка обновлений: " + ex.Message); }
+            } catch (Exception ex) { if(IsDisposed)return; coreManual.Tag=true;release = null; updateText.Text = ex is UpdateCheckException?ex.Message:"Не удалось проверить обновления. Попробуйте позже."; Append("Проверка обновлений: " + ex.Message); }
             finally { checkingUpdates = false; RefreshState(); }
         }
         Task RunChecks() {
@@ -261,29 +259,39 @@ namespace ZapretDesktop {
             check.Enabled = !busy && !scanning && !checkingUpdates; install.Enabled = !on && !external && !busy && !scanning && !starting && !checkingUpdates && !testing && !domainEditor.Dirty && release != null;
             rollback.Enabled = !on && !external && !busy && !scanning && !starting && !checkingUpdates && !testing && !domainEditor.Dirty && !String.IsNullOrEmpty(store.Settings.PreviousEngine);
             autoCheck.Enabled = !busy && !checkingUpdates; runChecks.Enabled = !busy && !starting && !scanning && !testing;
-            shellInstall.Enabled = stagedShell!=null && !busy && !starting && !scanning && !testing && !shellChecking && !domainEditor.Dirty;
+            appUpdateCard.Action.Enabled = !appUpdates.Working && !busy && !starting && !scanning && !dnsBusy && (appUpdates.Release==null || !domainEditor.Dirty) && !elevation;
+            appUpdateCard.Render(appUpdates,appUpdates.Release!=null && domainEditor.Dirty && !appUpdates.Working?"Сохраните изменения в «Дополнительно», чтобы обновиться.":null);
+            autoShell.Enabled = !appUpdates.Working && !busy;coreManual.Visible=expandedCore && coreManual.Tag!=null;
             tray.Text = "Обход — " + (on ? "включён" : "выключен");
         }
+        void AppUpdateChanged() {
+            if(IsDisposed || Disposing)return;
+            if(InvokeRequired){try{BeginInvoke(new Action(AppUpdateChanged));}catch(InvalidOperationException){}return;}
+            appUpdateCard.Render(appUpdates);tabs.SetNotice(2,appUpdates.Release!=null);RefreshState();
+        }
         async Task CheckShell(bool quiet) {
-            if(shellChecking || stagedShell!=null || busy || scanning || starting)return;
-            shellManual.Visible=false;shellChecking=true;RefreshState();
-            try {
-                var available=await shellUpdates.Check();if(IsDisposed)return;
-                if(available==null){shellText.Text="Версия "+ShellUpdates.Current+" · обновлений нет";return;}
-                shellText.Text="Скачиваем обновление "+available.Version+"…";
-                stagedShell=await shellUpdates.Stage(available,store.Root);if(IsDisposed)return;
-                shellText.Text="Обновление "+available.Version+" готово к установке";Append(shellText.Text);
-            }catch(Exception ex){if(!IsDisposed){shellManual.Visible=true;shellText.Text=ex is UpdateCheckException?ex.Message:"Не удалось проверить обновления. Попробуйте позже.";Append("Обновления приложения: "+ex.Message);}}
-            finally{shellChecking=false;if(!IsDisposed)RefreshState();}
+            if(busy || scanning || starting || appUpdates.Working)return;
+            await appUpdates.Check();
+            if(appUpdates.State==AppUpdateState.Failed)Append("Проверка обновления приложения: "+appUpdates.LastError);
+            if(appUpdates.State==AppUpdateState.Available)Append("Доступно обновление приложения "+appUpdates.Release.Version);
+        }
+        async Task AppUpdateAction() {
+            if(appUpdates.Release==null){await CheckShell(false);return;}
+            await ApplyShell();
         }
         async Task ApplyShell() {
-            if(stagedShell==null || busy || starting || scanning || testing || checkingUpdates || shellChecking || domainEditor.Dirty)return;
-            bool reconnect=runner.Running;busy=true;RefreshState();
+            if(busy || starting || scanning || dnsBusy || appUpdates.Working || domainEditor.Dirty)return;
+            busy=true;RefreshState();
             try {
-                await StopChecks();
-                ShellUpdates.Launch(stagedShell,Application.ExecutablePath,reconnect);
-                runner.Stop();exiting=true;Close();
-            }catch(Exception ex){busy=false;if(!IsDisposed){RefreshState();Error(ex);}}
+                if(await appUpdates.Prepare(store.Root)) {
+                    await StopChecks();
+                    bool reconnect=runner.Running;
+                    appUpdates.Installing();
+                    await ShellUpdates.Launch(appUpdates.Prepared,Application.ExecutablePath,reconnect);
+                    runner.Stop();exiting=true;Close();
+                }
+            }catch(Exception ex){if(!IsDisposed){appUpdates.Fail("Не удалось установить обновление. Попробуйте ещё раз.");Append("Обновления приложения: "+ex.Message);}}
+            finally{busy=false;if(!IsDisposed){RefreshState();if(pendingExit)Exit();}}
         }
         void Open(string target) { Process.Start(new ProcessStartInfo(target) { UseShellExecute = true }); }
         void Restore() { Show(); WindowState = FormWindowState.Normal; Activate(); }
@@ -305,6 +313,8 @@ namespace ZapretDesktop {
         }
         void Exit() {
             if(scanning){pendingExit=true;stopAfterScan=true;if(scanCancellation!=null)scanCancellation.Cancel();return;}
+            if(appUpdates.State==AppUpdateState.Downloading){pendingExit=true;appUpdates.Cancel();return;}
+            if(appUpdates.State==AppUpdateState.Installing){Restore();tabs.SelectedIndex=2;return;}
             if (busy) { Restore(); Error(new InvalidOperationException("Дождитесь завершения текущей операции.")); return; }
             try { runner.Stop(); exiting = true; Close(); } catch (Exception ex) { Error(ex); }
         }
@@ -314,7 +324,7 @@ namespace ZapretDesktop {
                 if (scanCancellation != null) scanCancellation.Cancel();
                 if (timer != null) { timer.Stop(); timer.Dispose(); }
                 if (tray != null) tray.Dispose();
-                runner.Dispose(); updater.Dispose(); shellUpdates.Dispose();
+                runner.Dispose(); updater.Dispose(); appUpdates.Dispose();
             }
             base.Dispose(disposing);
         }
