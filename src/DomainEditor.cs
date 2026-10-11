@@ -6,7 +6,7 @@ namespace ZapretDesktop {
     public sealed class SiteEntries : ResponsiveControl {
         readonly SlimScroll scroll=new SlimScroll();string[] entries=new string[0];int offset;
         public event Action<string> RemoveRequested;
-        public string EmptyText="Своих сайтов пока нет.\nДля YouTube и Discord добавлять ничего не нужно.";
+        public string EmptyText="Своих правил пока нет.\nДля YouTube и Discord добавлять ничего не нужно.";
         public SiteEntries(){DoubleBuffered=true;BackColor=Theme.Input;Font=new Font("Segoe UI",10);scroll.Dock=DockStyle.Right;scroll.BackColor=BackColor;Controls.Add(scroll);scroll.Changed+=value=>{offset=value;Invalidate();};}
         public void SetEntries(string text){entries=text.Replace("\r","").Split('\n').Select(x=>x.Trim()).Where(x=>x.Length>0 && !x.StartsWith("#")).ToArray();Sync();Invalidate();}
         void Sync(){int page=Math.Max(1,Height/S(44));offset=Math.Min(offset,Math.Max(0,entries.Length-page));scroll.SetRange(entries.Length-page,page,offset);}
@@ -25,9 +25,9 @@ namespace ZapretDesktop {
         public bool Dirty{get{return text.Editor.Text!=baseline;}}
         public DomainEditor(){
             BackColor=Theme.Background;
-            title=Theme.Label("Дополнительные сайты",18,true);
-            description=Theme.Label("YouTube и Discord уже настроены. Здесь можно добавить другой сайт.",10);description.ForeColor=Theme.Muted;
-            list=new DarkSelect();list.Items.AddRange(new object[]{"Добавить сайты к обходу","Исключить сайты из обхода","IP-исключения · дополнительно"});list.SelectedIndex=0;list.SelectedIndexChanged+=(s,e)=>ChangeList();
+            title=Theme.Label("Правила для сайтов",18,true);
+            description=Theme.Label("Настройка обработки трафика отдельных сайтов.\nIP и страна не меняются; ограничения самого сервиса не снимаются.",10);description.ForeColor=Theme.Muted;
+            list=new DarkSelect();list.Items.AddRange(new object[]{"Обрабатывать эти сайты","Не обрабатывать эти сайты","IP-исключения · дополнительно"});list.SelectedIndex=0;list.SelectedIndexChanged+=(s,e)=>ChangeList();
             text=new DarkEditor{Visible=false};entries=new SiteEntries();
             text.Editor.TextChanged+=(s,e)=>{entries.SetEntries(text.Editor.Text);if(!loading){status.Text=Dirty?"Нажмите «Сохранить», чтобы применить изменения":"";status.ForeColor=Theme.Muted;RefreshSave();}};
             inputFrame=new SurfacePanel{BackColor=Theme.Input,Padding=Padding.Empty};input=new TextBox{Name="site-input",BackColor=Theme.Input,ForeColor=Theme.Text,BorderStyle=BorderStyle.None,Font=new Font("Segoe UI",11)};inputFrame.Controls.Add(input);inputFrame.Resize+=(s,e)=>input.SetBounds(S(12),Math.Max(0,(inputFrame.Height-input.PreferredHeight)/2),Math.Max(1,inputFrame.Width-S(24)),input.PreferredHeight);
@@ -44,9 +44,9 @@ namespace ZapretDesktop {
         void AddSite(){if(!allowed)return;try{string site=DomainLists.FromInput(input.Text,loaded);if(text.Editor.Text.Replace("\r","").Split('\n').Any(x=>String.Equals(x.Trim(),site,StringComparison.OrdinalIgnoreCase)))throw new System.IO.InvalidDataException("Этот адрес уже добавлен.");text.Editor.Text=text.Editor.Text.TrimEnd()+Environment.NewLine+site+Environment.NewLine;input.Clear();input.Focus();}catch(Exception ex){SetError(ex.Message);}}
         public void LoadEngine(string path){engine=path;loading=true;loaded=Math.Max(0,list.SelectedIndex);text.Editor.Text=DomainLists.Read(path,loaded);baseline=text.Editor.Text;loading=false;status.Text="";entries.SetEntries(text.Editor.Text);RefreshSave();UpdateExplanation();}
         void UpdateExplanation(){
-            description.Text=loaded==0?"YouTube и Discord уже настроены. Здесь можно добавить другой сайт.":loaded==1?"Добавьте сайт сюда, если обход мешает его работе.":"Дополнительные исключения по IP. Если не уверены, оставьте список пустым.";
+            description.Text=loaded==0?"Настройка обработки трафика отдельных сайтов.\nIP и страна не меняются; ограничения самого сервиса не снимаются.":loaded==1?"Исключите сайт из обработки, если она мешает его работе.":"Дополнительные исключения по IP. Если не уверены, оставьте список пустым.";
             hint.Text=loaded==2?"Введите IP-адрес или сеть, например 192.168.1.0/24.":"Введите адрес сайта, например example.com, и нажмите «Добавить».";
-            entries.EmptyText=loaded==0?"Своих сайтов пока нет.\nДля YouTube и Discord добавлять ничего не нужно.":"Исключений пока нет.\nДобавлять их необязательно.";entries.Invalidate();
+            entries.EmptyText=loaded==0?"Своих правил пока нет.\nДля YouTube и Discord добавлять ничего не нужно.":"Исключений пока нет.\nДобавлять их необязательно.";entries.Invalidate();
         }
         void ChangeList(){if(engine==null || loading)return;if(Dirty){loading=true;list.SelectedIndex=loaded;loading=false;status.Text="Сначала сохраните или отмените изменения.";return;}loaded=list.SelectedIndex;input.Clear();LoadEngine(engine);}
         public void Saved(){LoadEngine(engine);status.Text="Сохранено";status.ForeColor=Theme.Success;}

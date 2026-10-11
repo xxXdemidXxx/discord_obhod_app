@@ -149,7 +149,7 @@ namespace ZapretDesktop {
             Assert(popup!=null && popup.Visible,"Custom strategy dropdown opens");
             using(var image=new Bitmap(popup.Width,popup.Height)){popup.DrawToBitmap(image,new Rectangle(Point.Empty,popup.Size));image.Save(Path.Combine(root,"tests","window-dropdown.png"));}
             dashboard.Profiles.Choose(1);Assert(dashboard.Profiles.SelectedIndex==1,"Custom strategy dropdown applies item selection");dashboard.Profiles.SelectedIndex=0;
-            tabs.SelectedIndex=1;var editor=AllControls(form).OfType<DomainEditor>().Single();editor.TextEditor.Text=String.Join("\r\n",Enumerable.Range(1,100).Select(i=>"site-"+i+".example"));Application.DoEvents();
+            tabs.SelectedIndex=tabs.TabPages.FindIndex(x=>AllControls(x).OfType<DomainEditor>().Any());var editor=AllControls(form).OfType<DomainEditor>().Single();editor.TextEditor.Text=String.Join("\r\n",Enumerable.Range(1,100).Select(i=>"site-"+i+".example"));Application.DoEvents();
             Assert(editor.Dirty && AllControls(editor).OfType<SlimScroll>().Any(x=>x.Visible),"Editor tracks unsaved text and shows thin scrollbar for long lists");
             using(var image=new Bitmap(form.Width,form.Height)){form.DrawToBitmap(image,new Rectangle(Point.Empty,form.Size));image.Save(Path.Combine(root,"tests","window-domain-scroll.png"));}
             editor.Discard();editor.TextEditor.Text="ui-save.example";var save=AllControls(editor).OfType<Button>().Single(x=>x.Text=="Сохранить");
@@ -168,7 +168,7 @@ namespace ZapretDesktop {
                 Assert(dashboard.History.Bottom<=dashboard.Height+1 && dashboard.Apply.Right<=dashboard.Width && dashboard.Dns.Right<=dashboard.Width,"Dashboard fits resized window "+size);
                 using(var picture=new Bitmap(form.Width,form.Height)){form.DrawToBitmap(picture,new Rectangle(Point.Empty,form.Size));picture.Save(Path.Combine(root,"tests","window-"+(size.Width<1000?"compact":"wide")+".png"));}
             }
-            form.Size=original;tabs.SelectedIndex=2;
+            form.Size=original;tabs.SelectedIndex=tabs.TabPages.FindIndex(x=>x.Text=="Настройки");
             AllControls(form).OfType<Button>().First(x=>x.Text.StartsWith("Настроить порты")).PerformClick();Application.DoEvents();
             using(var picture=new Bitmap(form.Width,form.Height)){form.DrawToBitmap(picture,new Rectangle(Point.Empty,form.Size));picture.Save(Path.Combine(root,"tests","window-ports.png"));}
             tabs.SelectedIndex=0;
