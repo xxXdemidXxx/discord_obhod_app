@@ -1,4 +1,4 @@
-﻿$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Stop'
 & (Join-Path $PSScriptRoot 'fetch-engine.ps1')
 $version = ([version]([regex]::Match((Get-Content -LiteralPath "$PSScriptRoot\src\Version.cs" -Raw), 'Value = "([0-9.]+)"').Groups[1].Value)).ToString(3)
 & (Join-Path $PSScriptRoot 'build.ps1')
@@ -37,3 +37,8 @@ $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant
 Set-Content -LiteralPath ($zip + '.sha256.txt') -Value "$hash  Obhod-$version-win-x64.zip" -Encoding ASCII
 Write-Output "For friends: $zip"
 Write-Output "SHA-256: $hash"
+$metadata = @{
+    tag_name="v$version";draft=$false;prerelease=$false
+    assets=@(@{name="Obhod-$version-win-x64.zip";browser_download_url="https://github.com/xxXdemidXxx/discord_obhod_app/releases/download/v$version/Obhod-$version-win-x64.zip";size=(Get-Item -LiteralPath $zip).Length;digest="sha256:$hash"})
+} | ConvertTo-Json -Depth 5
+[IO.File]::WriteAllText((Join-Path $releaseDir 'update.json'),$metadata,(New-Object Text.UTF8Encoding($false)))

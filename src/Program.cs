@@ -22,7 +22,7 @@ namespace ZapretDesktop {
                     try { if (!mutex.WaitOne(10000)) return; } catch (AbandonedMutexException) { }
                 }
                 try { Application.Run(new MainForm(new Store(AppDomain.CurrentDomain.BaseDirectory), args.Contains("--connect"), args.Contains("--autoselect"), args.Contains("--restore-connect"), args.Contains("--full-scan"))); }
-                catch (Exception ex) { MessageBox.Show(ex.Message, "Не удалось запустить Zapret Desktop", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+                catch (Exception ex) { MessageBox.Show(ex.Message, "Не удалось запустить Обход", MessageBoxButtons.OK, MessageBoxIcon.Error); }
                 finally { mutex.ReleaseMutex(); }
             }
         }
@@ -41,7 +41,7 @@ namespace ZapretDesktop {
         string activeStrategy,scanStep=""; int checkEpoch; Task manualCheckTask;
         CancellationTokenSource scanCancellation;
         readonly ShellUpdates shellUpdates = new ShellUpdates();
-        Label shellText; Button shellInstall; CheckBox autoShell; string stagedShell; bool shellChecking;
+        Label shellText; Button shellInstall,shellManual,coreManual; CheckBox autoShell; string stagedShell; bool shellChecking;
         bool previouslyOn;
         CancellationTokenSource checkCancellation; bool testing, checkingUpdates;
         NotifyIcon tray; System.Windows.Forms.Timer timer;
@@ -201,10 +201,10 @@ namespace ZapretDesktop {
         async Task CheckUpdates(bool quiet) {
             if (busy || scanning || checkingUpdates) return; checkingUpdates = true; RefreshState();
             try {
-                updateText.Text = "Проверяем обновления…"; release = await updater.Check(); if(IsDisposed)return;
+                coreManual.Visible=false;updateText.Text = "Проверяем обновления…"; release = await updater.Check(); if(IsDisposed)return;
                 if (release.Version == Updater.Version(store.Current)) { updateText.Text = "Обновлений нет"; release = null; }
                 else { updateText.Text = "Доступна версия " + release.Version; Append("Доступно обновление ядра " + release.Version); }
-            } catch (Exception ex) { if(IsDisposed)return; release = null; updateText.Text = "Не удалось проверить обновления. Попробуйте позже."; Append("Проверка обновлений: " + ex.Message); if (!quiet) Error(ex); }
+            } catch (Exception ex) { if(IsDisposed)return; coreManual.Visible=true;release = null; updateText.Text = ex is UpdateCheckException?ex.Message:"Не удалось проверить обновления. Попробуйте позже."; Append("Проверка обновлений: " + ex.Message); }
             finally { checkingUpdates = false; RefreshState(); }
         }
         Task RunChecks() {
@@ -266,14 +266,14 @@ namespace ZapretDesktop {
         }
         async Task CheckShell(bool quiet) {
             if(shellChecking || stagedShell!=null || busy || scanning || starting)return;
-            shellChecking=true;RefreshState();
+            shellManual.Visible=false;shellChecking=true;RefreshState();
             try {
                 var available=await shellUpdates.Check();if(IsDisposed)return;
                 if(available==null){shellText.Text="Версия "+ShellUpdates.Current+" · обновлений нет";return;}
                 shellText.Text="Скачиваем обновление "+available.Version+"…";
                 stagedShell=await shellUpdates.Stage(available,store.Root);if(IsDisposed)return;
                 shellText.Text="Обновление "+available.Version+" готово к установке";Append(shellText.Text);
-            }catch(Exception ex){if(!IsDisposed){shellText.Text="Не удалось проверить обновления. Попробуйте позже.";Append("Обновления приложения: "+ex.Message);if(!quiet)Error(ex);}}
+            }catch(Exception ex){if(!IsDisposed){shellManual.Visible=true;shellText.Text=ex is UpdateCheckException?ex.Message:"Не удалось проверить обновления. Попробуйте позже.";Append("Обновления приложения: "+ex.Message);}}
             finally{shellChecking=false;if(!IsDisposed)RefreshState();}
         }
         async Task ApplyShell() {
@@ -287,16 +287,17 @@ namespace ZapretDesktop {
         }
         void Open(string target) { Process.Start(new ProcessStartInfo(target) { UseShellExecute = true }); }
         void Restore() { Show(); WindowState = FormWindowState.Normal; Activate(); }
-        protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); AppActivation.Allow(Handle); }
+        protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); AppActivation.Allow(Handle); NativeFrame.Apply(Handle); }
         protected override void WndProc(ref Message m) {
             if ((uint)m.Msg == AppActivation.Message) { Restore(); return; }
-            if(m.Msg==0x83 && m.WParam!=IntPtr.Zero){m.Result=IntPtr.Zero;return;}
+            if(m.Msg==0x83 || m.Msg==0x85){m.Result=IntPtr.Zero;return;}
+            if(m.Msg==0x86){m.Result=new IntPtr(1);return;}
             base.WndProc(ref m);
             if(m.Msg==0x84 && WindowState==FormWindowState.Normal){long point=m.LParam.ToInt64();var p=PointToClient(new Point((short)(point&0xffff),(short)((point>>16)&0xffff)));int edge=8;bool left=p.X<edge,right=p.X>=ClientSize.Width-edge,top=p.Y<edge,bottom=p.Y>=ClientSize.Height-edge;int hit=top?(left?13:right?14:12):bottom?(left?16:right?17:15):left?10:right?11:0;if(hit!=0)m.Result=new IntPtr(hit);}
         }
-        protected override CreateParams CreateParams {get{var cp=base.CreateParams;cp.Style|=0x40000|0x10000|0x20000;return cp;}}
+        protected override CreateParams CreateParams {get{var cp=base.CreateParams;cp.Style=(cp.Style & ~NativeFrame.Caption)|0x40000|0x10000|0x20000;return cp;}}
         protected override void OnLoad(EventArgs e) {
-            base.OnLoad(e);
+            base.OnLoad(e);NativeFrame.Apply(Handle);
             var area=Screen.FromControl(this).WorkingArea;
             MinimumSize=new Size(Math.Min(MinimumSize.Width,area.Width-32),Math.Min(MinimumSize.Height,area.Height-32));
             Size=new Size(Math.Min(Width,area.Width-32),Math.Min(Height,area.Height-32));

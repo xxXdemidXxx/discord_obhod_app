@@ -27,7 +27,7 @@ namespace ZapretDesktop {
                 var root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".."));
                 var local = Path.GetFullPath(Path.Combine(root, "..", "zapret-discord-youtube-1.10.2"));
                 var official = Path.Combine(root, "downloads", "official-1.10.3", "zapret-discord-youtube-1.10.3");
-                if(!Directory.Exists(local))local=official; SelectionTests().GetAwaiter().GetResult(); DomainTests(root); ShellReplacementTest(root);
+                if(!Directory.Exists(local))local=official; SelectionTests().GetAwaiter().GetResult(); DomainTests(root); UpdateFeedTests().GetAwaiter().GetResult(); ShellReplacementTest(root);
                 foreach (var engine in new[] {local, official}.Distinct()) {
                     Strategy.ValidateEngine(engine);
                     var profiles = Directory.GetFiles(engine, "general*.bat"); Assert(profiles.Length == 22, "22 upstream profiles expected");
@@ -92,7 +92,7 @@ namespace ZapretDesktop {
                     store.Settings.CheckUpdates = false; store.Settings.AutoAppUpdates=false; store.Save();
                     Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
                     using (var form = new MainForm(store, false)) {
-                        form.StartPosition = FormStartPosition.Manual; form.Location = new Point(-2500, -2500); form.Show(); Application.DoEvents(); form.PerformLayout();
+                        form.StartPosition = FormStartPosition.Manual; form.Location = new Point(-2500, -2500); form.Show(); Application.DoEvents(); form.PerformLayout(); NativeFrameChecks(form,root);
                         if (args.Contains("--network")) {
                             var pages = FindTabs(form); pages.SelectedIndex = 0;
                             var button = AllControls(form).OfType<Button>().First(x => x.Text == "Проверить сервисы");
@@ -113,6 +113,35 @@ namespace ZapretDesktop {
                 Console.WriteLine("PASS: " + count + " checks"); return 0;
             } catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
         }
+        [DllImport("user32.dll")]static extern bool PrintWindow(IntPtr window,IntPtr context,uint flags);
+        [DllImport("user32.dll")]static extern IntPtr SendMessage(IntPtr window,int message,IntPtr wParam,IntPtr lParam);
+        static void NativeFrameChecks(MainForm form,string root){
+            Assert((NativeFrame.GetWindowLong(form.Handle,-16)&NativeFrame.Caption)==0,"Native caption absent after window creation");
+            SendMessage(form.Handle,0x86,IntPtr.Zero,IntPtr.Zero);SendMessage(form.Handle,0x86,new IntPtr(1),IntPtr.Zero);
+            form.WindowState=FormWindowState.Maximized;Application.DoEvents();form.WindowState=FormWindowState.Normal;Application.DoEvents();
+            Assert(form.ClientSize==form.Size && (NativeFrame.GetWindowLong(form.Handle,-16)&NativeFrame.Caption)==0,"Window frame stays removed after activation and maximize/restore");
+            using(var picture=new Bitmap(form.Width,form.Height)){var g=Graphics.FromImage(picture);var context=g.GetHdc();try{Assert(PrintWindow(form.Handle,context,0),"Entire native window captured including non-client area");}finally{g.ReleaseHdc(context);g.Dispose();}picture.Save(Path.Combine(root,"tests","window-native.png"));}
+        }
+        sealed class MockHttp : System.Net.Http.HttpMessageHandler {
+            public int Calls;public readonly System.Collections.Generic.List<string> Urls=new System.Collections.Generic.List<string>();
+            public Func<string,System.Net.Http.HttpResponseMessage> Reply;
+            protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(System.Net.Http.HttpRequestMessage request,CancellationToken token){Calls++;Urls.Add(request.RequestUri.AbsoluteUri);return Task.FromResult(Reply(request.RequestUri.AbsoluteUri));}
+        }
+        static string Feed(string version){return new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(new{tag_name="v"+version,draft=false,prerelease=false,assets=new[]{new{name="Obhod-"+version+"-win-x64.zip",browser_download_url="https://github.com/"+ShellUpdates.Repository+"/releases/download/v"+version+"/Obhod-"+version+"-win-x64.zip",digest="sha256:"+new string('a',64),size=123}}});}
+        static System.Net.Http.HttpResponseMessage Response(int status,string text){return new System.Net.Http.HttpResponseMessage((System.Net.HttpStatusCode)status){Content=new System.Net.Http.StringContent(text)};}
+        static async Task UpdateFeedTests(){
+            var http=new MockHttp{Reply=url=>Response(200,Feed("99.0.0"))};
+            using(var updates=new ShellUpdates(http)){var release=await updates.Check();Assert(release.Version=="99.0.0" && http.Calls==1 && http.Urls[0].EndsWith("/releases/latest/download/update.json"),"New shell release discovered without public API calls");}
+            http=new MockHttp{Reply=url=>Response(url.Contains("/download/")?404:200,Feed(ShellUpdates.Current))};
+            using(var updates=new ShellUpdates(http)){Assert(await updates.Check()==null && http.Calls==2 && http.Urls[1].StartsWith("https://api.github.com/"),"Legacy releases without a feed fall back to API once");}
+            http=new MockHttp{Reply=url=>Response(200,Feed("99.0.0").Replace("sha256:","sha512:"))};
+            using(var updates=new ShellUpdates(http)){bool rejected=false;try{await updates.Check();}catch(InvalidDataException){rejected=true;}Assert(rejected,"Feed without a valid hash cannot install an update");}
+            http=new MockHttp{Reply=url=>{var response=Response(403,"API rate limit exceeded");response.Headers.Add("X-RateLimit-Remaining","0");response.Headers.Add("X-RateLimit-Reset",((long)(DateTimeOffset.UtcNow.AddHours(1)-new DateTimeOffset(1970,1,1,0,0,0,TimeSpan.Zero)).TotalSeconds).ToString());return response;}};
+            using(var client=new System.Net.Http.HttpClient(http)){for(int i=0;i<2;i++){bool friendly=false;try{await GitHubMetadata.Get(client,"https://api.github.com/repos/test-fixture/backoff/releases/latest");}catch(UpdateCheckException ex){friendly=ex.Message.Contains("Попробуйте позже") && !ex.Message.Contains("403");}Assert(friendly,"Rate limit gets a readable message");}Assert(http.Calls==1,"Repeated checks respect GitHub reset time and do not send another request");}
+            http=new MockHttp{Reply=url=>Response(200,new string('a',1024*1024+1))};
+            using(var client=new System.Net.Http.HttpClient(http)){bool rejected=false;try{await GitHubMetadata.Get(client,"https://github.com/test/oversized");}catch(InvalidDataException){rejected=true;}Assert(rejected,"Oversized release metadata rejected");}
+            Assert(ServiceChecks.Targets.Last().Url.StartsWith("https://github.com/"),"Strategy probes check GitHub availability without consuming API quota");
+        }
         static void InteractiveUiChecks(MainForm form,string root) {
             var tabs=FindTabs(form);tabs.SelectedIndex=0;var dashboard=AllControls(form).OfType<Dashboard>().Single();
             typeof(DarkSelect).GetMethod("OnClick",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).Invoke(dashboard.Profiles,new object[]{EventArgs.Empty});Application.DoEvents();
@@ -125,6 +154,11 @@ namespace ZapretDesktop {
             using(var image=new Bitmap(form.Width,form.Height)){form.DrawToBitmap(image,new Rectangle(Point.Empty,form.Size));image.Save(Path.Combine(root,"tests","window-domain-scroll.png"));}
             editor.Discard();editor.TextEditor.Text="ui-save.example";var save=AllControls(editor).OfType<Button>().Single(x=>x.Text=="Сохранить");
             if(save.Enabled){save.PerformClick();Application.DoEvents();Assert(!editor.Dirty && editor.TextEditor.Text.Contains("ui-save.example"),"Domain editor saves through actual UI event");}else editor.Discard();
+            if(save.Enabled || !editor.TextEditor.ReadOnly){
+                var siteInput=AllControls(editor).OfType<TextBox>().Single(x=>x.Name=="site-input");siteInput.Text="https://added-via-ui.example/path";AllControls(editor).OfType<Button>().Single(x=>x.Text=="Добавить").PerformClick();
+                Assert(editor.Dirty && editor.TextEditor.Text.Contains("added-via-ui.example"),"Pasted URL adds a site through the visible UI");editor.Discard();
+                var engine=(string)typeof(DomainEditor).GetField("engine",System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Instance).GetValue(editor);DomainLists.Write(engine,0,"");editor.Discard();using(var picture=new Bitmap(form.Width,form.Height)){form.DrawToBitmap(picture,new Rectangle(Point.Empty,form.Size));picture.Save(Path.Combine(root,"tests","window-sites-empty.png"));}
+            }
             tabs.SelectedIndex=0;
         }
         static void ResponsiveScreens(MainForm form,string root) {
@@ -175,8 +209,9 @@ namespace ZapretDesktop {
             Assert(DomainLists.Normalize("192.168.1.0/24\n2001:db8::/32",2).Contains("2001:db8::/32"),"IPv4 and IPv6 ranges supported");
             Reject(()=>DomainLists.Normalize("192.168.1.0/64",2),"Invalid IPv4 prefix rejected");
             Reject(()=>DomainLists.Normalize("1",2),"IPv4 shorthand rejected");
+            Assert(DomainLists.FromInput("https://пример.рф/path",0)=="xn--e1afmkfd.xn--p1ai","Pasted website URL becomes a normalized domain");
             var folder=Path.Combine(root,"tests","fixture-domains-"+Guid.NewGuid().ToString("N"));
-            try{DomainLists.Write(folder,0,"first.example");string path=DomainLists.FilePath(folder,0);Reject(()=>DomainLists.Write(folder,0,"invalid url"),"Invalid list cannot overwrite saved entries");Assert(File.ReadAllText(path).Contains("first.example"),"Original list preserved on invalid input");DomainLists.Write(folder,0,"second.example");Assert(File.ReadAllText(path+".bak").Contains("first.example"),"Atomic domain replacement preserves backup");}finally{Directory.Delete(folder,true);}
+            try{DomainLists.Write(folder,0,"first.example");string path=DomainLists.FilePath(folder,0);Reject(()=>DomainLists.Write(folder,0,"invalid url"),"Invalid list cannot overwrite saved entries");Assert(File.ReadAllText(path).Contains("first.example"),"Original list preserved on invalid input");DomainLists.Write(folder,0,"second.example");Assert(File.ReadAllText(path+".bak").Contains("first.example"),"Atomic domain replacement preserves backup");DomainLists.Write(folder,0,"");Assert(DomainLists.Read(folder,0)=="" && new FileInfo(path).Length>0,"Empty user lists remain compatible with the engine and show no placeholder");File.WriteAllText(path,"# Never leave this file empty\r\ndomain.example.abc\r\n");Assert(DomainLists.Read(folder,0)=="","Upstream technical comment is hidden from the editor");DomainLists.Write(folder,2,"");Assert(DomainLists.Read(folder,2)=="" && new FileInfo(DomainLists.FilePath(folder,2)).Length>0,"Empty IP exclusions retain the engine sentinel");}finally{Directory.Delete(folder,true);}
         }
         static async Task SelectionTests() {
             string running=null; int checks=0; var started=new System.Collections.Generic.List<string>();
@@ -232,9 +267,16 @@ namespace ZapretDesktop {
             yield return root;
             foreach (Control child in root.Controls) foreach (var item in AllControls(child)) yield return item;
         }
+        static void TestApiCredential(System.Net.Http.HttpClient client){
+            var token=Environment.GetEnvironmentVariable("OBHOD_TEST_GITHUB_TOKEN");
+            if(!String.IsNullOrEmpty(token))client.DefaultRequestHeaders.Authorization=new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer",token);
+        }
         static async Task Network(Store store) {
             using (var updater = new Updater(store)) {
-                var release = await updater.Check(); Assert(release.Version == "1.10.3", "Latest official release fetched");
+                var apiClient=(System.Net.Http.HttpClient)typeof(Updater).GetField("client",System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Instance).GetValue(updater);
+                TestApiCredential(apiClient);Release release;
+                try{release=await updater.Check();}finally{apiClient.DefaultRequestHeaders.Authorization=null;}
+                Assert(release.Version == "1.10.3", "Latest official release fetched");
                 await updater.Install(release, Console.WriteLine);
                 Assert(Updater.Version(store.Current) == release.Version, "Verified official ZIP installed");
                 Assert(File.ReadAllText(Path.Combine(store.Current, "lists", "list-general-user.txt")) == "my-service.example\n", "User list survives real update");
@@ -243,7 +285,7 @@ namespace ZapretDesktop {
             using(var shell=new ShellUpdates()) {
                 Assert(await shell.Check()==null,"Installed shell version matches latest published release");
                 using(var client=new System.Net.Http.HttpClient()) {
-                    client.DefaultRequestHeaders.UserAgent.ParseAdd("Obhod-Test/"+ShellUpdates.Current);
+                    client.DefaultRequestHeaders.UserAgent.ParseAdd("Obhod-Test/"+ShellUpdates.Current);TestApiCredential(client);
                     var json=await client.GetStringAsync("https://api.github.com/repos/"+ShellUpdates.Repository+"/releases/latest");
                     var data=new System.Web.Script.Serialization.JavaScriptSerializer().Deserialize<System.Collections.Generic.Dictionary<string,object>>(json);
                     var asset=((System.Collections.ArrayList)data["assets"]).Cast<System.Collections.Generic.Dictionary<string,object>>().FirstOrDefault(x=>Convert.ToString(x["name"])=="Obhod-"+ShellUpdates.Current+"-win-x64.zip");

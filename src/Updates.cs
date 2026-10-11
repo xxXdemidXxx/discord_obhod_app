@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -23,11 +23,11 @@ namespace ZapretDesktop {
             this.store = store;
             ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
             client = new HttpClient { Timeout = TimeSpan.FromMinutes(3) };
-            client.DefaultRequestHeaders.UserAgent.ParseAdd("ZapretDesktop/0.1");
+            client.DefaultRequestHeaders.UserAgent.ParseAdd("Obhod/"+ShellUpdates.Current);
             client.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
         }
         public async Task<Release> Check() {
-            var json = await client.GetStringAsync("https://api.github.com/repos/Flowseal/zapret-discord-youtube/releases/latest");
+            var json = await GitHubMetadata.Get(client,"https://api.github.com/repos/Flowseal/zapret-discord-youtube/releases/latest");
             var data = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(json);
             var version = Convert.ToString(data["tag_name"]); store.EnginePath(version);
             var assets = (ArrayList)data["assets"];

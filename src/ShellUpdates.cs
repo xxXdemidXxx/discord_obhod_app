@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -20,9 +20,10 @@ namespace ZapretDesktop {
         public const string Repository = "xxXdemidXxx/discord_obhod_app";
         public static string Current {get{return Assembly.GetExecutingAssembly().GetName().Version.ToString(3);}}
         readonly HttpClient client;
-        public ShellUpdates() {
+        public ShellUpdates() : this(null) { }
+        public ShellUpdates(HttpMessageHandler handler) {
             ServicePointManager.SecurityProtocol=SecurityProtocolType.Tls12;
-            client=new HttpClient{Timeout=TimeSpan.FromMinutes(3)};
+            client=handler==null?new HttpClient():new HttpClient(handler);client.Timeout=TimeSpan.FromMinutes(3);
             client.DefaultRequestHeaders.UserAgent.ParseAdd("Obhod/"+Current);
             client.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
         }
@@ -43,10 +44,12 @@ namespace ZapretDesktop {
             throw new InvalidDataException("В релизе нет готовой Windows-сборки.");
         }
         public async Task<Release> Check() {
-            using(var response=await client.GetAsync("https://api.github.com/repos/"+Repository+"/releases/latest")) {
-                if(response.StatusCode==HttpStatusCode.NotFound)return null;
-                response.EnsureSuccessStatusCode();return Parse(await response.Content.ReadAsStringAsync());
-            }
+            // Published next to the ZIP, with its exact URL, size and SHA-256.
+            // Release downloads do not consume the public REST API quota.
+            var manifest=await GitHubMetadata.Get(client,"https://github.com/"+Repository+"/releases/latest/download/update.json",true);
+            if(manifest!=null)return Parse(manifest);
+            var json=await GitHubMetadata.Get(client,"https://api.github.com/repos/"+Repository+"/releases/latest",true);
+            return json==null?null:Parse(json);
         }
         public static void ValidateBinary(string path,string version) {
             var name=AssemblyName.GetAssemblyName(path);

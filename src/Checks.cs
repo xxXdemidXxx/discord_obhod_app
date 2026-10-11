@@ -24,7 +24,7 @@ namespace ZapretDesktop {
             new ServiceTarget("YouTube · изображения", "https://i.ytimg.com/vi/jNQXAC9IVRw/hqdefault.jpg"),
             new ServiceTarget("Discord · сайт", "https://discord.com/"),
             new ServiceTarget("Discord · API", "https://discord.com/api/v10/gateway"),
-            new ServiceTarget("GitHub · обновления", "https://api.github.com/repos/Flowseal/zapret-discord-youtube/releases/latest")
+            new ServiceTarget("GitHub · обновления", "https://github.com/xxXdemidXxx/discord_obhod_app/releases/latest")
         };
         public static async Task<CheckResult> Run(ServiceTarget target, CancellationToken token, int timeoutSeconds = 12) {
             var watch = Stopwatch.StartNew();
