@@ -6,7 +6,7 @@ if (-not (Test-Path -LiteralPath $app)) {throw 'Build the application first'}
 $shortcutPath = Join-Path $DestinationDirectory 'Обход.lnk'
 if (Test-Path -LiteralPath $shortcutPath) {
     $existing = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcutPath)
-    if ($existing.TargetPath -ne $app -and $existing.TargetPath -ne (Join-Path $PSScriptRoot 'dist\Obhod.exe')) {throw "A different shortcut already exists: $shortcutPath"}
+    if ((Split-Path -Parent $existing.TargetPath) -ne (Join-Path $PSScriptRoot 'dist') -or (Split-Path -Leaf $existing.TargetPath) -notmatch '^Obhod(?:-[0-9.]+)?\.exe$') {throw "A different shortcut already exists: $shortcutPath"}
 }
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($shortcutPath)
@@ -16,4 +16,3 @@ $shortcut.IconLocation = "$app,0"
 $shortcut.Description = 'Открыть окно управления обходом для Discord и YouTube'
 $shortcut.Save()
 Write-Output "Created shortcut: $shortcutPath"
-

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -149,6 +149,7 @@ namespace ZapretDesktop {
     public sealed class EngineRunner : IDisposable {
         private Process process;
         private OwnedJob job;
+        bool timestampsEnabled;
         public event Action<string> Log;
         public bool Running { get { return process != null && !process.HasExited; } }
         public bool Conflict { get { return Process.GetProcessesByName("winws").Any(p => { using(p) { return process == null || p.Id != process.Id; } }); } }
@@ -159,14 +160,14 @@ namespace ZapretDesktop {
             Stop();
             Strategy.ValidateEngine(engine);
             var arguments = Strategy.Arguments(engine, strategy);
-            if (Strategy.NeedsTcpTimestamps(arguments)) {
+            if (!timestampsEnabled && Strategy.NeedsTcpTimestamps(arguments)) {
                 // Equivalent to service.bat's tcp_enable, required for timestamp strategies.
                 using (var netsh = Process.Start(new ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "netsh.exe"), "interface tcp set global timestamps=enabled") {
                     UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true
                 })) {
                     if (!netsh.WaitForExit(5000)) { netsh.Kill(); throw new IOException("Не удалось включить TCP timestamps за 5 секунд."); }
                     if (netsh.ExitCode != 0) throw new IOException("Не удалось включить TCP timestamps: " + netsh.StandardOutput.ReadToEnd() + netsh.StandardError.ReadToEnd());
-                    Write("TCP timestamps включены для выбранной стратегии, как в исходном service.bat.");
+                    timestampsEnabled=true; Write("TCP timestamps включены для выбранной стратегии, как в исходном service.bat.");
                 }
             }
             var start = new ProcessStartInfo(Path.Combine(engine, "bin", "winws.exe"), arguments) {

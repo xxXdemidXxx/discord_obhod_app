@@ -27,7 +27,7 @@ namespace ZapretDesktop {
                 var root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".."));
                 var local = Path.GetFullPath(Path.Combine(root, "..", "zapret-discord-youtube-1.10.2"));
                 var official = Path.Combine(root, "downloads", "official-1.10.3", "zapret-discord-youtube-1.10.3");
-                if(!Directory.Exists(local))local=official; SelectionTests().GetAwaiter().GetResult(); ShellReplacementTest(root);
+                if(!Directory.Exists(local))local=official; SelectionTests().GetAwaiter().GetResult(); DomainTests(root); ShellReplacementTest(root);
                 foreach (var engine in new[] {local, official}.Distinct()) {
                     Strategy.ValidateEngine(engine);
                     var profiles = Directory.GetFiles(engine, "general*.bat"); Assert(profiles.Length == 22, "22 upstream profiles expected");
@@ -98,11 +98,11 @@ namespace ZapretDesktop {
                             var button = AllControls(form).OfType<Button>().First(x => x.Text == "Проверить сервисы");
                             button.PerformClick(); var watch = Stopwatch.StartNew();
                             while (!button.Enabled && watch.ElapsedMilliseconds < 18000) {Application.DoEvents(); Thread.Sleep(20);}
-                            Assert(button.Enabled && AllControls(form).OfType<Label>().Any(x => x.Text.StartsWith("Успешных ответов:")), "Parallel service checks render results in desktop window");
+                            Assert(button.Enabled && AllControls(form).OfType<Label>().Any(x => x.Text.StartsWith("Доступно:")), "Parallel service checks render results in desktop window");
                             pages.SelectedIndex = 0;
                         }
                         using (var image = new Bitmap(form.Width, form.Height)) { form.DrawToBitmap(image, new Rectangle(Point.Empty, form.Size)); image.Save(Path.Combine(root, "tests", "window.png")); }
-                        Assert(form.Controls.Count > 0, "Desktop UI constructed and rendered");
+                        Assert(form.Controls.Count > 0, "Desktop UI constructed and rendered"); InteractiveUiChecks(form,root); ResponsiveScreens(form,root);
                         var tabs = FindTabs(form);
                         for (int i = 1; i < tabs.TabPages.Count; i++) {
                             tabs.SelectedIndex = i; form.PerformLayout(); Application.DoEvents();
@@ -112,6 +112,37 @@ namespace ZapretDesktop {
                 } finally { Directory.Delete(temp, true); }
                 Console.WriteLine("PASS: " + count + " checks"); return 0;
             } catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
+        }
+        static void InteractiveUiChecks(MainForm form,string root) {
+            var tabs=FindTabs(form);tabs.SelectedIndex=0;var dashboard=AllControls(form).OfType<Dashboard>().Single();
+            typeof(DarkSelect).GetMethod("OnClick",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).Invoke(dashboard.Profiles,new object[]{EventArgs.Empty});Application.DoEvents();
+            var popup=(ToolStripDropDown)typeof(DarkSelect).GetField("popup",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).GetValue(dashboard.Profiles);
+            Assert(popup!=null && popup.Visible,"Custom strategy dropdown opens");
+            using(var image=new Bitmap(popup.Width,popup.Height)){popup.DrawToBitmap(image,new Rectangle(Point.Empty,popup.Size));image.Save(Path.Combine(root,"tests","window-dropdown.png"));}
+            dashboard.Profiles.Choose(1);Assert(dashboard.Profiles.SelectedIndex==1,"Custom strategy dropdown applies item selection");dashboard.Profiles.SelectedIndex=0;
+            tabs.SelectedIndex=1;var editor=AllControls(form).OfType<DomainEditor>().Single();editor.TextEditor.Text=String.Join("\r\n",Enumerable.Range(1,100).Select(i=>"site-"+i+".example"));Application.DoEvents();
+            Assert(editor.Dirty && AllControls(editor).OfType<SlimScroll>().Any(x=>x.Visible),"Editor tracks unsaved text and shows thin scrollbar for long lists");
+            using(var image=new Bitmap(form.Width,form.Height)){form.DrawToBitmap(image,new Rectangle(Point.Empty,form.Size));image.Save(Path.Combine(root,"tests","window-domain-scroll.png"));}
+            editor.Discard();editor.TextEditor.Text="ui-save.example";var save=AllControls(editor).OfType<Button>().Single(x=>x.Text=="Сохранить");
+            if(save.Enabled){save.PerformClick();Application.DoEvents();Assert(!editor.Dirty && editor.TextEditor.Text.Contains("ui-save.example"),"Domain editor saves through actual UI event");}else editor.Discard();
+            tabs.SelectedIndex=0;
+        }
+        static void ResponsiveScreens(MainForm form,string root) {
+            var tabs=FindTabs(form);tabs.SelectedIndex=0;var original=form.Size;
+            foreach(var size in new[]{new Size(940,690),new Size(1400,960)}) {
+                form.Size=size;form.PerformLayout();Application.DoEvents();var dashboard=AllControls(form).OfType<Dashboard>().Single();
+                Assert(dashboard.History.Bottom<=dashboard.Height+1 && dashboard.Apply.Right<=dashboard.Width && dashboard.Dns.Right<=dashboard.Width,"Dashboard fits resized window "+size);
+                using(var picture=new Bitmap(form.Width,form.Height)){form.DrawToBitmap(picture,new Rectangle(Point.Empty,form.Size));picture.Save(Path.Combine(root,"tests","window-"+(size.Width<1000?"compact":"wide")+".png"));}
+            }
+            form.Size=original;tabs.SelectedIndex=2;
+            AllControls(form).OfType<Button>().First(x=>x.Text.StartsWith("Настроить порты")).PerformClick();Application.DoEvents();
+            using(var picture=new Bitmap(form.Width,form.Height)){form.DrawToBitmap(picture,new Rectangle(Point.Empty,form.Size));picture.Save(Path.Combine(root,"tests","window-ports.png"));}
+            tabs.SelectedIndex=0;
+            form.Scale(new SizeF(1.5f,1.5f));form.Size=new Size(1650,1035);Application.DoEvents();form.PerformLayout();
+            var scaled=AllControls(form).OfType<Dashboard>().Single();
+            Assert(scaled.History.Bottom<=scaled.Height+1 && scaled.Categories.Right<=scaled.Width,"Layout stays within bounds at 150 percent scale");
+            using(var picture=new Bitmap(form.Width,form.Height)){form.DrawToBitmap(picture,new Rectangle(Point.Empty,form.Size));picture.Save(Path.Combine(root,"tests","window-scale150.png"));}
+            form.Scale(new SizeF(2f/3f,2f/3f));form.Size=original;Application.DoEvents();
         }
         static void ShellReplacementTest(string root) {
             var folder=Path.Combine(root,"tests","fixture-update-"+Guid.NewGuid().ToString("N"));
@@ -133,6 +164,17 @@ namespace ZapretDesktop {
                 Assert(File.ReadAllText(target+".previous")=="previous executable" && File.ReadAllText(target+".config.previous")=="previous config","Old executable and configuration backed up");
                 Assert(File.ReadAllText(settings)=="preserved settings","Shell update does not overwrite user settings");
             } finally {Directory.Delete(folder,true);}
+        }
+        static void DomainTests(string root) {
+            string normalized=DomainLists.Normalize("Example.COM\nexample.com\nпример.рф\n# comment\n",0);
+            Assert(normalized.StartsWith("example.com\r\nxn--e1afmkfd.xn--p1ai") && normalized.Split(new[]{"example.com"},StringSplitOptions.None).Length==2,"Domains normalized, IDN supported, duplicates removed");
+            Reject(()=>DomainLists.Normalize("https://youtube.com/watch",0),"URLs cannot be saved as domain entries");
+            Reject(()=>DomainLists.Normalize("192.168.1.1",0),"IP addresses use their own list");
+            Assert(DomainLists.Normalize("192.168.1.0/24\n2001:db8::/32",2).Contains("2001:db8::/32"),"IPv4 and IPv6 ranges supported");
+            Reject(()=>DomainLists.Normalize("192.168.1.0/64",2),"Invalid IPv4 prefix rejected");
+            Reject(()=>DomainLists.Normalize("1",2),"IPv4 shorthand rejected");
+            var folder=Path.Combine(root,"tests","fixture-domains-"+Guid.NewGuid().ToString("N"));
+            try{DomainLists.Write(folder,0,"first.example");string path=DomainLists.FilePath(folder,0);Reject(()=>DomainLists.Write(folder,0,"invalid url"),"Invalid list cannot overwrite saved entries");Assert(File.ReadAllText(path).Contains("first.example"),"Original list preserved on invalid input");DomainLists.Write(folder,0,"second.example");Assert(File.ReadAllText(path+".bak").Contains("first.example"),"Atomic domain replacement preserves backup");}finally{Directory.Delete(folder,true);}
         }
         static async Task SelectionTests() {
             string running=null; int checks=0; var started=new System.Collections.Generic.List<string>();
@@ -160,6 +202,16 @@ namespace ZapretDesktop {
             Assert(dns.Failure=="dns" && dns.Milliseconds==42,"Typed nested DNS error classified");
             Assert(ServiceChecks.FromException(new System.Net.Http.HttpRequestException("dns text only"),0).Failure=="connection","Error message alone does not imply DNS failure");
             Assert(ServiceChecks.FromException(new System.Security.Authentication.AuthenticationException("fixture"),0).Failure=="tls","TLS failure remains distinct");
+            int quickChecks=0,confirmations=0;running=null;
+            selected=await StrategySelector.Run(new[]{"partial","working","unneeded"},(name,token)=>{running=name;return Task.FromResult(0);},()=>running=null,
+                token=>{quickChecks++;return Task.FromResult(results(running=="partial"?3:5,10));},CancellationToken.None,null,null,true,
+                token=>{confirmations++;return Task.FromResult(results(5,20));});
+            Assert(selected.Winner.Strategy=="working" && selected.Candidates.Count==2 && quickChecks==2 && confirmations==1,"Quick mode stops after first full result and separate confirmation");
+            running=null;int confirmCalls=0;
+            selected=await StrategySelector.Run(new[]{"flaky","good"},(name,token)=>{running=name;return Task.FromResult(0);},()=>running=null,
+                token=>Task.FromResult(results(5,10)),CancellationToken.None,null,null,true,
+                token=>{confirmCalls++;return Task.FromResult(results(running=="flaky"?4:5,20));});
+            Assert(selected.Winner.Strategy=="good" && confirmCalls==2,"Quick mode continues after failed confirmation");
             string next="99.0.0";
             string json="{\"tag_name\":\"v"+next+"\",\"draft\":false,\"prerelease\":false,\"assets\":[{\"name\":\"Obhod-"+next+"-win-x64.zip\",\"browser_download_url\":\"https://github.com/"+ShellUpdates.Repository+"/releases/download/v"+next+"/Obhod-"+next+"-win-x64.zip\",\"digest\":\"sha256:"+new string('a',64)+"\",\"size\":100}]}";
             Assert(ShellUpdates.Parse(json).Version==next,"Stable newer shell release accepted");
@@ -192,13 +244,13 @@ namespace ZapretDesktop {
                     client.DefaultRequestHeaders.UserAgent.ParseAdd("Obhod-Test/"+ShellUpdates.Current);
                     var json=await client.GetStringAsync("https://api.github.com/repos/"+ShellUpdates.Repository+"/releases/latest");
                     var data=new System.Web.Script.Serialization.JavaScriptSerializer().Deserialize<System.Collections.Generic.Dictionary<string,object>>(json);
-                    var asset=((System.Collections.ArrayList)data["assets"]).Cast<System.Collections.Generic.Dictionary<string,object>>().First(x=>Convert.ToString(x["name"])=="Obhod-"+ShellUpdates.Current+"-win-x64.zip");
-                    var release=new Release{Version=ShellUpdates.Current,Url=Convert.ToString(asset["browser_download_url"]),Size=Convert.ToInt64(asset["size"]),Digest=Convert.ToString(asset["digest"])};
+                    var asset=((System.Collections.ArrayList)data["assets"]).Cast<System.Collections.Generic.Dictionary<string,object>>().FirstOrDefault(x=>Convert.ToString(x["name"])=="Obhod-"+ShellUpdates.Current+"-win-x64.zip");
+                    if(asset!=null) {var release=new Release{Version=ShellUpdates.Current,Url=Convert.ToString(asset["browser_download_url"]),Size=Convert.ToInt64(asset["size"]),Digest=Convert.ToString(asset["digest"])};
                     var settings=Path.Combine(store.Root,"data","settings.json");var before=Updater.Hash(settings);
                     var prepared=await shell.Stage(release,store.Root);
                     Assert(File.Exists(prepared) && File.Exists(prepared+".config"),"Published shell ZIP downloaded, hashed and staged");
                     ShellUpdates.ValidateBinary(prepared,ShellUpdates.Current);count++;
-                    Assert(Updater.Hash(settings)==before,"Real shell download preserves existing settings");
+                    Assert(Updater.Hash(settings)==before,"Real shell download preserves existing settings");}else Console.WriteLine("Current shell release not published yet; staging probe runs after publication.");
                 }
             }
             foreach (var target in ServiceChecks.Targets) {
@@ -209,5 +261,3 @@ namespace ZapretDesktop {
         }
     }
 }
-
-

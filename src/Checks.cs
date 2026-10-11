@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Diagnostics;
 using System.Net.Http;
 using System.Net;
@@ -26,11 +26,11 @@ namespace ZapretDesktop {
             new ServiceTarget("Discord · API", "https://discord.com/api/v10/gateway"),
             new ServiceTarget("GitHub · обновления", "https://api.github.com/repos/Flowseal/zapret-discord-youtube/releases/latest")
         };
-        public static async Task<CheckResult> Run(ServiceTarget target, CancellationToken token) {
+        public static async Task<CheckResult> Run(ServiceTarget target, CancellationToken token, int timeoutSeconds = 12) {
             var watch = Stopwatch.StartNew();
             using (var handler = new HttpClientHandler { UseProxy = false, AllowAutoRedirect = true })
-            using (var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(12) }) {
-                client.DefaultRequestHeaders.UserAgent.ParseAdd("Obhod/0.3");
+            using (var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(timeoutSeconds) }) {
+                client.DefaultRequestHeaders.UserAgent.ParseAdd("Obhod/"+ShellUpdates.Current);
                 try {
                     using (var response = await client.GetAsync(target.Url, HttpCompletionOption.ResponseHeadersRead, token)) {
                         return new CheckResult { State = response.IsSuccessStatusCode ? 1 : 2,
@@ -38,7 +38,7 @@ namespace ZapretDesktop {
                             Milliseconds = watch.ElapsedMilliseconds };
                     }
                 } catch (OperationCanceledException) {
-                    return new CheckResult { State = 0, Detail = token.IsCancellationRequested ? "Отменено" : "Тайм-аут · 12 секунд", Failure = token.IsCancellationRequested ? "cancelled" : "timeout", Milliseconds = watch.ElapsedMilliseconds };
+                    return new CheckResult { State = 0, Detail = token.IsCancellationRequested ? "Отменено" : "Тайм-аут · "+timeoutSeconds+" секунд", Failure = token.IsCancellationRequested ? "cancelled" : "timeout", Milliseconds = watch.ElapsedMilliseconds };
                 } catch (HttpRequestException ex) {
                     return FromException(ex, watch.ElapsedMilliseconds);
                 }
@@ -56,12 +56,12 @@ namespace ZapretDesktop {
             }
             return new CheckResult {State = 0, Failure = failure, Detail = detail + " | " + error.GetBaseException().Message, Milliseconds = elapsed};
         }
-        public static async Task<CheckResult[]> Batch(CancellationToken token, Action<int, CheckResult> completed) {
+        public static async Task<CheckResult[]> Batch(CancellationToken token, Action<int, CheckResult> completed, int timeoutSeconds = 12) {
             // Do not reuse an HTTP connection or .NET's cached DNS between strategies.
             ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
             ServicePointManager.DnsRefreshTimeout = 0;
             return await Task.WhenAll(Targets.Select(async (target,index) => {
-                var result = await Run(target, token);
+                var result = await Run(target, token, timeoutSeconds);
                 token.ThrowIfCancellationRequested();
                 if (completed != null) completed(index,result);
                 return result;
