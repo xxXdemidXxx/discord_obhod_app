@@ -2,6 +2,8 @@
 
 [На главную](README.md) · [Инструкция пользователя](USAGE.md)
 
+Владельцу сборки: [пошаговая настройка подписи и выпуск релиза](OWNER-GUIDE.md).
+
 ByPass написан на C# / WinForms для Windows 10/11 x64 и .NET Framework 4.8. NuGet не используется; сборка выполняется системным компилятором .NET Framework.
 
 ## Сборка и проверка
@@ -51,7 +53,7 @@ https://github.com/xxXdemidXxx/discord_obhod_app/releases/latest/download/ByPass
 
 ## Публикация новой версии
 
-1. Увеличьте `AppVersion.Value` в `src/Version.cs`, например до `0.5.1.0`, обновите документацию и `RELEASE-NOTES.md`.
+1. Увеличьте `AppVersion.Value` в `src/Version.cs`, например после 0.5.2 до `0.5.3.0`, обновите документацию и `RELEASE-NOTES.md`.
 2. Выполните `./test.ps1`, сделайте commit и push. Workflow проверит этот commit, просканирует пакет и подготовит черновик релиза. Actions закреплены полными SHA; сборка имеет только `contents: read`, запись разрешена отдельному заданию черновика.
 3. Дождитесь успешного workflow. На компьютере владельца с локальным ключом, из чистого checkout этого commit, выполните:
 
