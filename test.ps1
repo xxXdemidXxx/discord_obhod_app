@@ -1,6 +1,7 @@
 param([switch]$Network)
 $ErrorActionPreference = 'Stop'
 & "$PSScriptRoot\tests\PortableKeyTests.ps1"
+& "$PSScriptRoot\tools\test-owner-assistant.ps1"
 & (Join-Path $PSScriptRoot 'fetch-engine.ps1')
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $source = Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'src') -Filter '*.cs' | ForEach-Object FullName
