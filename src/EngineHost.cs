@@ -97,6 +97,7 @@ namespace ZapretDesktop {
                 if(!HostWire.GetNamedPipeServerProcessId(pipe.SafePipeHandle.DangerousGetHandle(),out server) || server!=parent)throw new InvalidDataException("Неизвестный клиент управления.");
                 string installation=Path.GetDirectoryName(HostWire.Image(parent));Trust.NoLinks(installation);
                 string snapshot=Path.Combine(HostWire.ProtectedRoot,"runtime-"+Guid.NewGuid().ToString("N"));HostWire.ProtectDirectory(snapshot);
+                var snapshots=new List<string>{snapshot};string preparedVersion=null;
                 bool done=false;
                 runner.Log+=line=>{try{HostWire.Write(pipe,new {type="log",text=line.Length>8192?line.Substring(0,8192):line});}catch{}};
                 using(var monitor=new Timer(_=>{try{if(gui.HasExited)pipe.Dispose();}catch{}},null,500,500)) {
@@ -104,9 +105,11 @@ namespace ZapretDesktop {
                         HostWire.Write(pipe,new{type="hello"});
                         while(!done) {
                             var command=HostWire.Read(pipe);string action=(string)command["action"];
+                            bool preparing=false;
                             try {
                                 switch(action) {
                                     case "start":
+                                        preparing=true;
                                         runner.Stop();
                                         string version=(string)command["engine"],strategy=(string)command["strategy"];
                                         if(!System.Text.RegularExpressions.Regex.IsMatch(version,@"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$") || version.Contains(".."))throw new InvalidDataException("Некорректная версия.");
@@ -114,22 +117,42 @@ namespace ZapretDesktop {
                                         Dictionary<string,byte[]> inputs=null;
                                         // Read with the caller's token, so the administrator cannot be used to read privileged files.
                                         HostWire.AsCaller(parent,()=>{inputs=ReadInputs(source);});
-                                        foreach(var path in Trust.Files(snapshot).ToArray())File.Delete(path);
-                                        foreach(var item in inputs){string path=Path.Combine(snapshot,item.Key);Directory.CreateDirectory(Path.GetDirectoryName(path));File.WriteAllBytes(path,item.Value);}
-                                        Trust.VerifyEngine(snapshot);runner.Start(snapshot,strategy);break;
+                                        if(preparedVersion!=null && preparedVersion!=version){snapshot=Path.Combine(HostWire.ProtectedRoot,"runtime-"+Guid.NewGuid().ToString("N"));HostWire.ProtectDirectory(snapshot);snapshots.Add(snapshot);preparedVersion=null;}
+                                        WriteSnapshot(snapshot,inputs,preparedVersion!=null);preparedVersion=version;
+                                        preparing=false;runner.Start(snapshot,strategy);break;
                                     case "stop":runner.Stop();break;
                                     case "status":break;
                                     case "shutdown":runner.Stop();done=true;break;
                                     default:throw new InvalidDataException("Неизвестная команда.");
                                 }
                                 HostWire.Write(pipe,new{type="reply",running=runner.Running,error=""});
-                            }catch(Exception ex){HostWire.Write(pipe,new{type="reply",running=runner.Running,error=ex.Message});}
+                            }catch(Exception ex){HostWire.Write(pipe,new{type="reply",running=runner.Running,error=ex.Message,error_kind=preparing?"setup":"strategy"});}
                         }
-                    }finally{runner.Stop();try{Directory.Delete(snapshot,true);}catch{}}
+                    }finally{runner.Stop();foreach(string folder in snapshots)try{Directory.Delete(folder,true);}catch{}}
                 }
             }
         }
-        static Dictionary<string,byte[]> ReadInputs(string source) {
+        internal static void WriteSnapshot(string snapshot,Dictionary<string,byte[]> inputs,bool reuse) {
+            // WinDivert can keep its driver mapped after winws exits. Reuse the
+            // verified immutable files; only user data changes between starts.
+            Trust.NoLinks(snapshot);
+            if(reuse)Trust.VerifyEngine(snapshot);
+            foreach(string path in Trust.Files(snapshot).ToArray()) {
+                string relative=path.Substring(Path.GetFullPath(snapshot).TrimEnd('\\').Length+1).Replace('\\','/');
+                if(Trust.Mutable(relative) && !inputs.ContainsKey(relative))File.Delete(path);
+            }
+            foreach(var item in inputs) {
+                string path=Path.Combine(snapshot,item.Key);Trust.NoLinks(path);
+                if(reuse && !Trust.Mutable(item.Key)) {
+                    using(var sha=System.Security.Cryptography.SHA256.Create())
+                        if(Trust.Hex(sha.ComputeHash(item.Value))!=Trust.Hash(path))throw new InvalidDataException("Состав ядра изменился. Перезапустите ByPass.");
+                    continue;
+                }
+                Directory.CreateDirectory(Path.GetDirectoryName(path));File.WriteAllBytes(path,item.Value);
+            }
+            Trust.VerifyEngine(snapshot);
+        }
+        internal static Dictionary<string,byte[]> ReadInputs(string source) {
             var entry=Trust.VerifyEngine(source);
             var required=new HashSet<string>(((ArrayList)entry["files"]).Cast<Dictionary<string,object>>().Select(x=>(string)x["path"]),StringComparer.OrdinalIgnoreCase);
             var result=new Dictionary<string,byte[]>(StringComparer.OrdinalIgnoreCase);long total=0;

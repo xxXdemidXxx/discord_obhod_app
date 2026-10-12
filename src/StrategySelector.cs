@@ -15,7 +15,7 @@ namespace ZapretDesktop {
         static async Task<bool> Confirm(CandidateResult candidate,Func<string,CancellationToken,Task> start,Action stop,Func<CancellationToken,Task<CheckResult[]>> check,CancellationToken token,Action<CandidateResult> completed){
             bool keep=false;
             try{await start(candidate.Strategy,token);candidate.Results=await check(token);token.ThrowIfCancellationRequested();if(candidate.Complete){candidate.Confirmed=true;keep=true;}else candidate.Error="Повторная проверка не прошла";}
-            catch(OperationCanceledException){throw;}catch(Exception ex){candidate.Error=ex.Message;}
+            catch(OperationCanceledException){throw;}catch(EngineSetupException){throw;}catch(Exception ex){candidate.Error=ex.Message;}
             finally{if(!keep)stop();}
             if(completed!=null)completed(candidate);return keep;
         }
@@ -24,7 +24,7 @@ namespace ZapretDesktop {
             try{
                 for(int i=0;i<strategies.Length;i++){
                     token.ThrowIfCancellationRequested();stop();var candidate=new CandidateResult{Strategy=strategies[i]};if(progress!=null)progress(i+1,strategies.Length,candidate.Strategy);
-                    try{await start(candidate.Strategy,token);candidate.Results=await check(token);}catch(OperationCanceledException){throw;}catch(Exception ex){candidate.Error=ex.Message;}finally{stop();}
+                    try{await start(candidate.Strategy,token);candidate.Results=await check(token);}catch(OperationCanceledException){throw;}catch(EngineSetupException){throw;}catch(Exception ex){candidate.Error=ex.Message;}finally{stop();}
                     selection.Candidates.Add(candidate);if(completed!=null)completed(candidate);
                     if(firstMatch && candidate.Complete){if(progress!=null)progress(i+1,strategies.Length,"Подтверждение: "+candidate.Strategy);keep=await Confirm(candidate,start,stop,confirmation??check,token,completed);if(keep){selection.Winner=candidate;return selection;}}
                 }

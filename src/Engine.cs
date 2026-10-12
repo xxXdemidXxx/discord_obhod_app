@@ -8,12 +8,20 @@ using System.Text.RegularExpressions;
 using System.Web.Script.Serialization;
 
 namespace ZapretDesktop {
+    public sealed class EngineSetupException : Exception {
+        public EngineSetupException(string message,Exception inner=null):base(message,inner){}
+    }
+    public sealed class EngineStartException : Exception {
+        public EngineStartException(string message):base(message){}
+    }
     public sealed class Settings {
         public string Engine = "1.10.3";
         public string PreviousEngine = "";
         public string Strategy = "general.bat";
         public bool CheckUpdates = true;
         public bool AutoAppUpdates = true;
+        public bool AutoInstallShell = false;
+        public bool AutoInstallCore = false;
     }
 
     public sealed class Store {

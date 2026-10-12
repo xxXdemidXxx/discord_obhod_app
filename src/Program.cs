@@ -14,6 +14,11 @@ namespace ZapretDesktop {
         [STAThread]
         static void Main(string[] args) {
             Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
+            Application.ThreadException+=(s,e)=>{
+                var window=Application.OpenForms.OfType<MainForm>().FirstOrDefault();
+                if(window!=null){try{window.ReportProblem(e.Exception);}catch{Trace.TraceError(e.Exception.ToString());}}
+                else Trace.TraceError(e.Exception.ToString());
+            };
             if (args.Length >= 3 && args[0] == "--apply-update") { ShellUpdates.Apply(args); return; }
             bool created;
             using (var mutex = new Mutex(true, "Local\\ZapretDesktop-Flowseal", out created)) {
@@ -22,7 +27,10 @@ namespace ZapretDesktop {
                     try { if (!mutex.WaitOne(10000)) return; } catch (AbandonedMutexException) { }
                 }
                 try { Application.Run(new MainForm(new Store(AppDomain.CurrentDomain.BaseDirectory), args.Contains("--connect"), args.Contains("--autoselect"), args.Contains("--restore-connect"), args.Contains("--full-scan"))); }
-                catch (Exception ex) { MessageBox.Show(ex.Message, "Не удалось запустить ByPass", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+                catch (Exception ex) {
+                    try{File.AppendAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"data","app.log"),DateTime.Now.ToString("s")+" Запуск ByPass: "+ex+Environment.NewLine);}catch{}
+                    MessageBox.Show("Не удалось открыть ByPass.\nРаспакуйте полный ZIP программы в новую папку и запустите ByPass.exe.\nЕсли это повторяется, передайте разработчику файл data/app.log.", "ByPass", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
                 finally { mutex.ReleaseMutex(); }
             }
         }
@@ -43,14 +51,16 @@ namespace ZapretDesktop {
         readonly AppUpdateSession appUpdates;
         readonly Func<string,string,bool> confirmUpdate;
         UpdateNotice updateNotice;
+        ProblemNotice problemNotice;
         Label ownerMark;
         AppUpdateCard appUpdateCard; Button coreManual; CheckBox autoShell; bool updateOutcome;
+        CheckBox autoInstallShell,autoInstallCore;
         bool previouslyOn;
         CancellationTokenSource checkCancellation; bool testing, checkingUpdates;
         NotifyIcon tray; System.Windows.Forms.Timer timer;
         Release release; bool busy, exiting, loading;
-        public MainForm(Store store, bool start, bool auto = false, bool restoreConnection = false, bool fullScan = false, ShellUpdates shellUpdates = null, Func<string,string,bool> updateConfirmation = null) {
-            this.store = store; updater = new Updater(store);appUpdates=new AppUpdateSession(shellUpdates??new ShellUpdates());
+        public MainForm(Store store, bool start, bool auto = false, bool restoreConnection = false, bool fullScan = false, ShellUpdates shellUpdates = null, Func<string,string,bool> updateConfirmation = null,Updater coreUpdates=null) {
+            this.store = store; updater = coreUpdates??new Updater(store);appUpdates=new AppUpdateSession(shellUpdates??new ShellUpdates());
             confirmUpdate=updateConfirmation??((title,message)=>MessageBox.Show(this,message,title,MessageBoxButtons.YesNo,MessageBoxIcon.Question,MessageBoxDefaultButton.Button2)==DialogResult.Yes);
             activeStrategy = store.Settings.Strategy;
             BuildInterface();
@@ -67,7 +77,14 @@ namespace ZapretDesktop {
 #endif
             var outcome=ShellUpdates.TakeOutcome(store.Root);updateOutcome=outcome!=null;
             if(outcome!=null){if(outcome.Success && outcome.Version==ShellUpdates.Current)appUpdates.Complete();else {appUpdates.Fail("Обновление не установлено. Текущая версия сохранена.");Append("Установка обновления: "+outcome.Error);}tabs.SelectedIndex=2;}
-            Shown += async (s,e) => {Append("ByPass "+ShellUpdates.Current+". Ядро "+Updater.Version(store.Current));if(auto)await AutoSelect(restoreConnection);else if(start)await ApplyStrategy();if(!IsDisposed && store.Settings.AutoAppUpdates && !updateOutcome)await CheckShell(true);if(!IsDisposed && store.Settings.CheckUpdates)await CheckUpdates(true);};
+            Shown += async (s,e) => {
+                Append("ByPass "+ShellUpdates.Current+". Ядро "+Updater.Version(store.Current));
+                bool earlyUpdates=store.Settings.AutoInstallShell || store.Settings.AutoInstallCore;
+                if(earlyUpdates){if((store.Settings.AutoAppUpdates || store.Settings.AutoInstallShell) && !updateOutcome)await CheckShell(true);if(IsDisposed || exiting)return;if(store.Settings.CheckUpdates || store.Settings.AutoInstallCore)await CheckUpdates(true);if(IsDisposed || exiting)return;}
+                if(auto)await AutoSelect(restoreConnection);else if(start)await ApplyStrategy();
+                if(!earlyUpdates && !IsDisposed && store.Settings.AutoAppUpdates && !updateOutcome)await CheckShell(true);
+                if(!earlyUpdates && !IsDisposed && store.Settings.CheckUpdates)await CheckUpdates(true);
+            };
             FormClosing += (s,e) => { if (!exiting && e.CloseReason==CloseReason.UserClosing) { e.Cancel = true; Hide(); } };
         }
         Label Label(string text, float size, Color color, int x, int y, int width, int height) {
@@ -84,7 +101,8 @@ namespace ZapretDesktop {
         Panel Page(string text) { return new Panel { Text = text, BackColor = background, ForeColor = Color.White, AutoScroll = false, Padding = new Padding(Px(24)) }; }
         TextBox Input(int x, int y, int width) { return new TextBox { Location = new Point(x,y), Size = new Size(width,32), BackColor = card, ForeColor = Color.White, BorderStyle = BorderStyle.FixedSingle }; }
         void Guard(Action action) { try { action(); } catch (Exception ex) { Error(ex); } }
-        void Error(Exception ex) { Append("Ошибка: " + ex.Message); MessageBox.Show(this, ex.Message, "ByPass", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
+        void Error(Exception ex) { Append("Ошибка: " + ex); problemNotice.ShowProblem(ex); }
+        internal void ReportProblem(Exception ex){Error(ex);}
         public void Append(string line) {
             if (IsDisposed || Disposing) return;
             if (InvokeRequired) { try { BeginInvoke(new Action<string>(Append), line); } catch (InvalidOperationException) {} return; }
@@ -102,6 +120,7 @@ namespace ZapretDesktop {
                 tcp.Text = t == "12" ? "1024-65535" : t; udp.Text = u == "12" ? "1024-65535" : u;
                 autoCheck.Checked = store.Settings.CheckUpdates; version.Text = "Ядро " + Updater.Version(store.Current);
                 autoShell.Checked = store.Settings.AutoAppUpdates; domainEditor.LoadEngine(store.Current);
+                autoInstallShell.Checked=store.Settings.AutoInstallShell;autoInstallCore.Checked=store.Settings.AutoInstallCore;
             } finally { loading = false; RefreshState(); }
         }
         void FilterProfiles() {
@@ -136,6 +155,7 @@ namespace ZapretDesktop {
         }
         async Task ApplyStrategy() {
             if(busy || starting || scanning)return;
+            problemNotice.Clear();
             starting=true;RefreshState();
             try {
                 if (profiles.SelectedItem == null) throw new InvalidOperationException("Нет стратегий. Проверьте папку data/engines.");
@@ -159,11 +179,12 @@ namespace ZapretDesktop {
         }
         async Task AutoSelect(bool restoreConnection) {
             if(scanning || busy || starting || dnsBusy)return;
+            problemNotice.Clear();
             if(runner.Conflict){Error(new InvalidOperationException("Завершите внешний winws перед автоподбором."));return;}
             bool wasRunning=runner.Running || restoreConnection;
             string original=runner.Running?activeStrategy:store.Settings.Strategy;
             bool quick=dashboard.ScanMode.SelectedIndex==0;
-            Strategy.ValidateEngine(store.Current);
+            try{Strategy.ValidateEngine(store.Current);Trust.VerifyEngine(store.Current);}catch(Exception ex){Error(new EngineSetupException("Не удалось подготовить ядро.\n"+ex.Message,ex));return;}
             scanning=true;stopAfterScan=false;scanCancellation=new CancellationTokenSource();var token=scanCancellation.Token;
             var names=store.Strategies();dashboard.ResetHistory(names);RefreshState();bool chosen=false;
             try {
@@ -185,7 +206,7 @@ namespace ZapretDesktop {
                     dashboard.ScanSummary.Text="Полного результата 5/5 не найдено."+(dnsFailure?"\nЕсть ошибки DNS — откройте диагностику.":"\nРезультаты всех стратегий — в таблице.");
                 }
             }catch(OperationCanceledException){if(!IsDisposed)dashboard.ScanSummary.Text="Автоподбор отменён.";}
-            catch(Exception ex){if(!IsDisposed){dashboard.ScanSummary.Text="Автоподбор завершился с ошибкой.";Error(ex);}}
+            catch(Exception ex){if(!IsDisposed){dashboard.ScanSummary.Text=ex is EngineSetupException?"Подбор остановлен: не удалось запустить ядро.\nПодробности — в журнале.":"Автоподбор завершился с ошибкой.";Error(ex);}}
             {
                 if(!chosen) {
                     try {
@@ -203,7 +224,7 @@ namespace ZapretDesktop {
             try {
                 coreManual.Tag=null;updateText.Text = "Проверяем обновления…"; release = await updater.Check(); if(IsDisposed)return;
                 if (release.Version == Updater.Version(store.Current)) { updateText.Text = "Обновлений нет"; release = null; }
-                else { updateText.Text = "Доступна версия " + release.Version; Append("Доступно обновление ядра " + release.Version); }
+                else { updateText.Text = "Доступна версия " + release.Version; Append("Доступно обновление ядра " + release.Version);if(store.Settings.AutoInstallCore)await InstallCore(true); }
             } catch (Exception ex) { if(IsDisposed)return; coreManual.Tag=true;release = null; updateText.Text = ex is UpdateCheckException?ex.Message:"Не удалось проверить обновления. Попробуйте позже."; Append("Проверка обновлений: " + ex.Message); }
             finally { checkingUpdates = false; RefreshState(); }
         }
@@ -219,7 +240,7 @@ namespace ZapretDesktop {
             dashboard.ClearResults("Проверяем: "+engineState+"…");RefreshState();
             try {
                 var results=await ServiceChecks.Batch(token,(index,item)=>{if(IsDisposed || epoch!=checkEpoch)return;dashboard.SetResult(index,item);Append(ServiceChecks.Targets[index].Name+": "+item.Detail+" · "+item.Milliseconds+" мс");});
-                if(!IsDisposed && epoch==checkEpoch){checkSummary.Text="Доступно: "+results.Count(x=>x.State==1)+" из 5";if(results.Any(x=>x.Failure=="dns"))dashboard.ScanSummary.Text="Есть ошибка DNS.\nНажмите «Диагностика DNS».";}
+                if(!IsDisposed && epoch==checkEpoch){checkSummary.Text="Доступно: "+results.Count(x=>x.State==1)+" из 5"+(!runner.Running && !runner.Conflict?" · обход выключен":"");if(results.Any(x=>x.Failure=="dns"))dashboard.ScanSummary.Text="Есть ошибка DNS.\nНажмите «Диагностика DNS».";}
             }catch(OperationCanceledException){}catch(Exception ex){if(!IsDisposed)Error(ex);}
             finally{testing=false;localCancellation.Dispose();if(checkCancellation==localCancellation)checkCancellation=null;if(!IsDisposed)RefreshState();}
         }
@@ -236,14 +257,19 @@ namespace ZapretDesktop {
                 }
             }catch(Exception ex){if(!IsDisposed)Error(ex);}finally{dnsBusy=false;if(!IsDisposed)RefreshState();}
         }
-        async Task Install() {
+        Task Install(){return InstallCore(false);}
+        async Task InstallCore(bool automatic) {
             if (busy || scanning || starting || domainEditor.Dirty || release == null) return;
-            if (runner.Running || runner.Conflict) { Error(new InvalidOperationException("Сначала остановите все процессы winws.")); return; }
-            if(!confirmUpdate("Обновление ядра","Установить новую версию ядра "+release.Version+"?\n\nВаши настройки и списки сохранятся. Предыдущую версию можно будет вернуть."))return;
+            if(automatic && !store.Settings.AutoInstallCore)return;
+            if (runner.Conflict || (!automatic && runner.Running)) { if(!automatic)Error(new InvalidOperationException("Сначала выключите обход."));else Append("Автообновление ядра отложено: запущен другой обход.");return; }
+            if(!automatic && !confirmUpdate("Обновление ядра","Установить новую версию ядра "+release.Version+"?\n\nВаши настройки и списки сохранятся. Предыдущую версию можно будет вернуть."))return;
+            bool reconnect=runner.Running;
             busy = true; RefreshState();
-            try { await StopChecks(); InvalidateChecks("Ядро обновлено · запустите проверку заново"); await updater.Install(release, message => {updateText.Text = message; Append(message);}); release = null; LoadSettings(); }
-            catch (Exception ex) { updateText.Text = "Обновление не установлено. Текущее ядро сохранено."; Error(ex); }
-            finally { busy = false; RefreshState(); }
+            try {
+                try { await StopChecks(); if(reconnect)runner.Stop();InvalidateChecks("Обновляем ядро…"); await updater.Install(release, message => {updateText.Text = message; Append(message);}); release = null; LoadSettings(); }
+                catch (Exception ex) { updateText.Text = "Обновление не установлено. Текущее ядро сохранено."; if(!IsDisposed)Error(ex); }
+                if(reconnect && !IsDisposed && !exiting){try{await StartEngine(store.Settings.Strategy,CancellationToken.None);}catch(Exception ex){Error(ex);}}
+            }finally{busy=false;if(!IsDisposed)RefreshState();}
         }
         void RefreshState() {
             if (IsDisposed) return;
@@ -261,11 +287,11 @@ namespace ZapretDesktop {
             dashboard.Dns.Enabled = !busy && !starting && !scanning && !dnsBusy;
             check.Enabled = !busy && !scanning && !checkingUpdates; install.Enabled = !on && !external && !busy && !scanning && !starting && !checkingUpdates && !testing && !domainEditor.Dirty && release != null;
             rollback.Enabled = !on && !external && !busy && !scanning && !starting && !checkingUpdates && !testing && !domainEditor.Dirty && !String.IsNullOrEmpty(store.Settings.PreviousEngine);
-            autoCheck.Enabled = !busy && !checkingUpdates; runChecks.Enabled = !busy && !starting && !scanning && !testing;
+            autoCheck.Enabled = !busy && !checkingUpdates && !store.Settings.AutoInstallCore;autoInstallCore.Enabled=!busy && !checkingUpdates; runChecks.Enabled = !busy && !starting && !scanning && !testing;
             appUpdateCard.Action.Enabled = !appUpdates.Working && !busy && !starting && !scanning && !dnsBusy && (appUpdates.Release==null || !domainEditor.Dirty);
             appUpdateCard.Render(appUpdates,appUpdates.Release!=null && domainEditor.Dirty && !appUpdates.Working?"Сохраните изменения в «Дополнительно», чтобы обновиться.":null);
             updateNotice.Render(appUpdates.Release==null?null:appUpdates.Release.Version,release==null?null:release.Version,appUpdateCard.Action.Enabled,install.Enabled,on || external);
-            autoShell.Enabled = !appUpdates.Working && !busy;coreManual.Visible=expandedCore && coreManual.Tag!=null;
+            autoShell.Enabled = !appUpdates.Working && !busy && !store.Settings.AutoInstallShell;autoInstallShell.Enabled=!appUpdates.Working && !busy;coreManual.Visible=coreManual.Tag!=null;
             tray.Text = "ByPass — " + (on ? "включён" : "выключен");
         }
         void AppUpdateChanged() {
@@ -278,11 +304,14 @@ namespace ZapretDesktop {
             await appUpdates.Check();
             if(appUpdates.State==AppUpdateState.Failed)Append("Проверка обновления приложения: "+appUpdates.LastError);
             if(appUpdates.State==AppUpdateState.Available)Append("Доступно обновление приложения "+appUpdates.Release.Version);
+            if(!IsDisposed && appUpdates.State==AppUpdateState.Available && store.Settings.AutoInstallShell)await InstallShell(true);
         }
-        async Task AppUpdateAction() {
+        Task AppUpdateAction(){return InstallShell(false);}
+        async Task InstallShell(bool automatic) {
             if(appUpdates.Release==null){await CheckShell(false);return;}
             if(busy || starting || scanning || dnsBusy || appUpdates.Working || domainEditor.Dirty)return;
-            if(!confirmUpdate("Обновление ByPass","Обновить оболочку до версии "+appUpdates.Release.Version+"?\n\nПриложение перезапустится. Ваши настройки и списки сохранятся."))return;
+            if(automatic && !store.Settings.AutoInstallShell)return;
+            if(!automatic && !confirmUpdate("Обновление ByPass","Обновить оболочку до версии "+appUpdates.Release.Version+"?\n\nПриложение перезапустится. Ваши настройки и списки сохранятся."))return;
             await ApplyShell();
         }
         async Task ApplyShell() {
@@ -307,7 +336,8 @@ namespace ZapretDesktop {
             if(m.Msg==0x83 || m.Msg==0x85){m.Result=IntPtr.Zero;return;}
             if(m.Msg==0x86){m.Result=new IntPtr(1);return;}
             base.WndProc(ref m);
-            if(m.Msg==0x84 && WindowState==FormWindowState.Normal){long point=m.LParam.ToInt64();var p=PointToClient(new Point((short)(point&0xffff),(short)((point>>16)&0xffff)));int edge=8;bool left=p.X<edge,right=p.X>=ClientSize.Width-edge,top=p.Y<edge,bottom=p.Y>=ClientSize.Height-edge;int hit=top?(left?13:right?14:12):bottom?(left?16:right?17:15):left?10:right?11:0;if(hit!=0)m.Result=new IntPtr(hit);}
+            if(m.Msg==0x24){var screen=Screen.FromHandle(m.HWnd);NativeFrame.ConstrainMaximize(m.LParam,screen.Bounds,screen.WorkingArea,MinimumSize);}
+            if(m.Msg==0x84 && WindowState==FormWindowState.Normal){long point=m.LParam.ToInt64();var p=PointToClient(new Point((short)(point&0xffff),(short)((point>>16)&0xffff)));int edge=Px(6);bool left=p.X<edge,right=p.X>=ClientSize.Width-edge,top=p.Y<edge,bottom=p.Y>=ClientSize.Height-edge;int hit=top?(left?13:right?14:12):bottom?(left?16:right?17:15):left?10:right?11:0;if(hit!=0)m.Result=new IntPtr(hit);}
         }
         protected override CreateParams CreateParams {get{var cp=base.CreateParams;cp.Style=(cp.Style & ~NativeFrame.Caption)|0x40000|0x10000|0x20000;return cp;}}
         protected override void OnLoad(EventArgs e) {

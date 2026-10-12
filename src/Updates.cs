@@ -19,10 +19,10 @@ namespace ZapretDesktop {
     public sealed class Updater : IDisposable {
         private readonly HttpClient client;
         private readonly Store store;
-        public Updater(Store store) {
+        public Updater(Store store,HttpMessageHandler handler=null) {
             this.store = store;
             ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
-            client = new HttpClient { Timeout = TimeSpan.FromMinutes(3) };
+            client = handler==null?new HttpClient():new HttpClient(handler);client.Timeout=TimeSpan.FromMinutes(3);
             client.DefaultRequestHeaders.UserAgent.ParseAdd("ByPass/"+ShellUpdates.Current);
             client.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
         }

@@ -84,6 +84,31 @@ namespace ZapretDesktop {
             Assert(String.Equals(HostWire.Image(Process.GetCurrentProcess().Id),Application.ExecutablePath,StringComparison.OrdinalIgnoreCase),"Process path can be verified with limited query access");
             bool readAsCaller=false;HostWire.AsCaller(Process.GetCurrentProcess().Id,()=>{readAsCaller=File.Exists(Application.ExecutablePath);});
             Assert(readAsCaller,"Helper source reads can use caller token");
+            SnapshotTests(root,official);
+        }
+        static void SnapshotTests(string root,string official) {
+            string folder=Path.Combine(root,"tests","fixture-snapshot-"+Guid.NewGuid().ToString("N"));
+            string source=Path.Combine(folder,"source"),snapshot=Path.Combine(folder,"runtime");Copy(official,source);Directory.CreateDirectory(snapshot);
+            try {
+                File.WriteAllText(Path.Combine(source,"utils","game_filter.enabled"),"all");
+                File.WriteAllBytes(Path.Combine(source,"bin","ACTIVE_GAME_UDP.bin"),new byte[]{1,2,3});
+                EngineHost.WriteSnapshot(snapshot,EngineHost.ReadInputs(source),false);
+                string driver=Path.Combine(snapshot,"bin","WinDivert64.sys");DateTime written=File.GetLastWriteTimeUtc(driver);
+                using(var mapped=new FileStream(driver,FileMode.Open,FileAccess.Read,FileShare.Read)) {
+                    bool locked=false;try{File.Delete(driver);}catch(IOException){locked=true;}catch(UnauthorizedAccessException){locked=true;}
+                    Assert(locked,"Fixture reproduces driver that cannot be deleted after process shutdown");
+                    File.WriteAllText(Path.Combine(source,"lists","list-general-user.txt"),"new.example\n");
+                    File.Delete(Path.Combine(source,"utils","game_filter.enabled"));File.Delete(Path.Combine(source,"bin","ACTIVE_GAME_UDP.bin"));
+                    var inputs=EngineHost.ReadInputs(source);
+                    foreach(string strategy in Directory.GetFiles(source,"general*.bat"))EngineHost.WriteSnapshot(snapshot,inputs,true);
+                    Assert(File.GetLastWriteTimeUtc(driver)==written && Trust.VerifyEngine(snapshot)!=null,"All strategy transitions preserve locked driver and signed immutable core");
+                    Assert(File.ReadAllText(Path.Combine(snapshot,"lists","list-general-user.txt"))=="new.example\n" && !File.Exists(Path.Combine(snapshot,"utils","game_filter.enabled")) && !File.Exists(Path.Combine(snapshot,"bin","ACTIVE_GAME_UDP.bin")),"Restart refreshes lists and removes disabled game data while driver remains locked");
+                    inputs["bin/WinDivert64.sys"][0]^=1;
+                    Reject(()=>EngineHost.WriteSnapshot(snapshot,inputs,true),"Changed immutable input cannot replace the locked trusted driver");
+                }
+                File.AppendAllText(Path.Combine(snapshot,"general.bat"),"tamper");
+                Reject(()=>EngineHost.WriteSnapshot(snapshot,EngineHost.ReadInputs(source),true),"Reuse cannot silently repair or trust a modified protected strategy");
+            }finally{RemoveFixture(folder);}
         }
         [DllImport("shell32.dll", SetLastError=true)] static extern IntPtr CommandLineToArgvW([MarshalAs(UnmanagedType.LPWStr)] string command, out int argc);
         [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
@@ -140,6 +165,7 @@ namespace ZapretDesktop {
         }
         [STAThread] static int Main(string[] args) {
             if (args.Contains("--stub") || Path.GetFileName(Application.ExecutablePath).Equals("winws.exe", StringComparison.OrdinalIgnoreCase)) { Console.WriteLine("Test stub started"); Thread.Sleep(30000); return 0; }
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
             try {
                 var root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".."));
                 var local = Path.GetFullPath(Path.Combine(root, "..", "zapret-discord-youtube-1.10.2"));
@@ -219,7 +245,7 @@ namespace ZapretDesktop {
                             pages.SelectedIndex = 0;
                         }
                         using (var image = new Bitmap(form.Width, form.Height)) { form.DrawToBitmap(image, new Rectangle(Point.Empty, form.Size)); image.Save(Path.Combine(root, "tests", "window.png")); }
-                        Assert(form.Controls.Count > 0, "Desktop UI constructed and rendered"); InteractiveUiChecks(form,root); ResponsiveScreens(form,root); AppUpdateUiTests(store,root); AppUpdateOutcomeUiTests(store);
+                        Assert(form.Controls.Count > 0, "Desktop UI constructed and rendered"); ProblemUiChecks(form,root); DiagnosticLogTests(store,root); InteractiveUiChecks(form,root); ResponsiveScreens(form,root); AppUpdateUiTests(store,root); AutomaticUpdateTests(root,official); AppUpdateOutcomeUiTests(store);
                         var tabs = FindTabs(form);
                         for (int i = 1; i < tabs.TabPages.Count; i++) {
                             tabs.SelectedIndex = i; form.PerformLayout(); Application.DoEvents();
@@ -231,12 +257,55 @@ namespace ZapretDesktop {
             } catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
         }
         [DllImport("user32.dll")]static extern bool PrintWindow(IntPtr window,IntPtr context,uint flags);
+        static void ProblemUiChecks(MainForm form,string root) {
+            var notice=AllControls(form).OfType<ProblemNotice>().Single();var flags=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic;
+            string detail=@"Отказано в доступе C:\ProgramData\ByPass\runtime-fixture\bin\WinDivert64.sys";
+            typeof(MainForm).GetMethod("Error",flags).Invoke(form,new object[]{new EngineSetupException(detail,new UnauthorizedAccessException(detail))});Application.DoEvents();
+            Assert(notice.Visible && notice.Message.Text.Contains("Не удалось включить обход") && !notice.Message.Text.Contains("WinDivert") && !notice.Message.Text.Contains("C:"),"System exception becomes a calm inline explanation without raw paths or blocking dialog");
+            using(var image=new Bitmap(form.Width,form.Height)){form.DrawToBitmap(image,new Rectangle(Point.Empty,form.Size));image.Save(Path.Combine(root,"tests","window-problem.png"));}
+            notice.Details.PerformClick();Application.DoEvents();
+            Assert(FindTabs(form).SelectedIndex==3 && AllControls(form).OfType<TextBox>().Any(x=>x.Text.Contains(detail)),"Technical cause remains available through the notice's log button");
+            notice.Dismiss.PerformClick();Assert(!notice.Visible,"Problem notice can be dismissed without acknowledging a modal warning");
+            Assert(UserProblems.Message(new EngineSetupException("fixture",new System.ComponentModel.Win32Exception(1223))).Contains("Запуск отменён"),"Declined Windows elevation gets a clear cancellation explanation");
+            FindTabs(form).SelectedIndex=5;Application.DoEvents();
+            var mark=AllControls(form).OfType<Label>().Single(x=>x.Text.StartsWith("ByPass "+ShellUpdates.Current+" ·"));
+            Assert(mark.Visible && mark.Cursor!=Cursors.Hand && mark.Parent!=form && !form.Controls.Contains(mark),"Author identity is a non-clickable line in Help, without a global footer");
+            FindTabs(form).SelectedIndex=0;Application.DoEvents();
+        }
+        static void DiagnosticLogTests(Store store,string root) {
+            string folder=Path.Combine(root,"tests","fixture-log-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(folder);
+            try {
+                string profile=Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),file=Path.Combine(folder,"report.txt");
+                File.AppendAllText(Path.Combine(store.Root,"data","app.log"),"Fixture failure: "+profile+"\\Desktop\\ByPass\\file.sys\n");
+                DiagnosticLog.Save(store,false,"general.bat","visible fallback",file);string report=File.ReadAllText(file);
+                Assert(report.Contains("Оболочка: "+ShellUpdates.Current) && report.Contains("Ядро:") && report.Contains("Обход: выключен") && report.Contains("Fixture failure"),"Exported support file contains versions, connection state and actual saved errors");
+                Assert(report.Contains("%USERPROFILE%") && !report.Contains(profile),"Support export masks user profile paths instead of collecting account information");
+            }finally{RemoveFixture(folder);}
+        }
         [DllImport("user32.dll")]static extern IntPtr SendMessage(IntPtr window,int message,IntPtr wParam,IntPtr lParam);
         static void NativeFrameChecks(MainForm form,string root){
             Assert((NativeFrame.GetWindowLong(form.Handle,-16)&NativeFrame.Caption)==0,"Native caption absent after window creation");
             SendMessage(form.Handle,0x86,IntPtr.Zero,IntPtr.Zero);SendMessage(form.Handle,0x86,new IntPtr(1),IntPtr.Zero);
             form.WindowState=FormWindowState.Maximized;Application.DoEvents();form.WindowState=FormWindowState.Normal;Application.DoEvents();
             Assert(form.ClientSize==form.Size && (NativeFrame.GetWindowLong(form.Handle,-16)&NativeFrame.Caption)==0,"Window frame stays removed after activation and maximize/restore");
+            var edges=new[]{new Point(1,form.Height/2),new Point(form.Width-2,form.Height/2),new Point(form.Width/2,1),new Point(1,1),new Point(form.Width-2,1),new Point(form.Width/2,form.Height-2),new Point(1,form.Height-2),new Point(form.Width-2,form.Height-2)};
+            int[] hits={10,11,12,13,14,15,16,17};
+            for(int i=0;i<edges.Length;i++) {
+                Point screen=form.PointToScreen(edges[i]);long packed=(ushort)screen.X|((long)(ushort)screen.Y<<16);
+                Assert(form.GetChildAtPoint(edges[i])==null && SendMessage(form.Handle,0x84,IntPtr.Zero,new IntPtr(packed)).ToInt32()==hits[i],"Window edge and corner "+hits[i]+" reaches native resize handling");
+            }
+            var maximize=AllControls(form).OfType<Button>().Single(x=>x.Name=="MaximizeWindow");
+            Rectangle work=Screen.FromControl(form).WorkingArea;
+            maximize.PerformClick();Application.DoEvents();
+            Assert(form.Visible && form.WindowState==FormWindowState.Maximized && form.Bounds==work,"Actual maximize button keeps the window visible inside monitor working area");
+            maximize.PerformClick();Application.DoEvents();
+            Assert(form.Visible && form.WindowState==FormWindowState.Normal,"Actual maximize button restores without hiding to tray");
+            IntPtr data=Marshal.AllocHGlobal(40);
+            try {
+                for(int i=0;i<10;i++)Marshal.WriteInt32(data,i*4,0);
+                NativeFrame.ConstrainMaximize(data,new Rectangle(-1920,-1080,1920,1080),new Rectangle(-1880,-1080,1880,1040),new Size(940,690));
+                Assert(Marshal.ReadInt32(data,8)==1880 && Marshal.ReadInt32(data,12)==1040 && Marshal.ReadInt32(data,16)==40 && Marshal.ReadInt32(data,20)==0,"Maximize uses monitor-relative coordinates on negative-coordinate desktop and respects taskbar");
+            }finally{Marshal.FreeHGlobal(data);}
             using(var picture=new Bitmap(form.Width,form.Height)){var g=Graphics.FromImage(picture);var context=g.GetHdc();try{Assert(PrintWindow(form.Handle,context,0),"Entire native window captured including non-client area");}finally{g.ReleaseHdc(context);g.Dispose();}picture.Save(Path.Combine(root,"tests","window-native.png"));}
         }
         sealed class MockHttp : System.Net.Http.HttpMessageHandler {
@@ -324,8 +393,8 @@ namespace ZapretDesktop {
             }finally{RemoveFixture(folder);}
             }
         }
-        static void Pump(Task task){
-            var watch=Stopwatch.StartNew();while(!task.IsCompleted && watch.ElapsedMilliseconds<15000){Application.DoEvents();Thread.Sleep(10);}Assert(task.IsCompleted,"Update action finishes without a modal dialog");task.GetAwaiter().GetResult();Application.DoEvents();
+        static void Pump(Task task,int timeout=15000){
+            var watch=Stopwatch.StartNew();while(!task.IsCompleted && watch.ElapsedMilliseconds<timeout){Application.DoEvents();Thread.Sleep(10);}Assert(task.IsCompleted,"Update action finishes without a modal dialog");task.GetAwaiter().GetResult();Application.DoEvents();
         }
         static Task UpdateClick(MainForm form){return (Task)typeof(MainForm).GetMethod("AppUpdateAction",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).Invoke(form,null);}
         static void Capture(Form form,string path){form.PerformLayout();Application.DoEvents();using(var image=new Bitmap(form.Width,form.Height)){form.DrawToBitmap(image,new Rectangle(Point.Empty,form.Size));image.Save(path);}}
@@ -362,11 +431,11 @@ namespace ZapretDesktop {
                 http.AsyncReply=null;http.Reply=url=>Response(200,new string('x',123));Pump(UpdateClick(form));
                 Assert(card.Action.Text=="Повторить обновление" && card.Action.Enabled && Application.OpenForms.Count==2,"Failed installation stays inline and leaves the existing window usable");
                 Capture(form,Path.Combine(root,"tests","window-updates-error.png"));
-                foreach(var size in new[]{new Size(940,690),new Size(1400,960)}){form.Size=size;form.PerformLayout();Application.DoEvents();Assert(card.Action.Right<=card.Width && card.Startup.Bottom<=card.Height && card.Bottom<=card.Parent.Height,"Update actions fit resized window "+size);}
+                foreach(var size in new[]{new Size(940,690),new Size(1400,960)}){form.Size=size;form.PerformLayout();Application.DoEvents();Assert(card.Action.Right<=card.Width && card.AutoInstall.Bottom<=card.Height && card.Bottom<=card.Parent.Height,"Update actions fit resized window "+size);}
                 Capture(form,Path.Combine(root,"tests","window-updates-compact.png"));
-                var components=AllControls(form).OfType<Button>().Single(x=>x.Text.StartsWith("Компоненты обхода"));components.PerformClick();Application.DoEvents();
-                Assert(components.Parent.Bottom<=components.Parent.Parent.ClientSize.Height && AllControls(components.Parent).Where(x=>x.Visible && x!=components.Parent).All(x=>x.Bottom<=components.Parent.Height),"Expanded component controls fit the updates page without clipping: card "+components.Parent.Bounds+" page "+components.Parent.Parent.ClientSize+" children "+String.Join(",",AllControls(components.Parent).Where(x=>x.Visible).Select(x=>x.Text+":"+x.Bounds)));
-                Capture(form,Path.Combine(root,"tests","window-updates-components.png"));components.PerformClick();
+                var components=AllControls(form).OfType<Label>().Single(x=>x.Text=="Ядро");
+                Assert(components.Visible && AllControls(components.Parent).Where(x=>x.Visible && x!=components.Parent).All(x=>x.Bottom<=components.Parent.Height),"Core card is expanded by default and every update control fits its card");
+                Capture(form,Path.Combine(root,"tests","window-updates-components.png"));
                 http.Reply=url=>Response(200,Feed(ShellUpdates.Current));var session=(AppUpdateSession)typeof(MainForm).GetField("appUpdates",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).GetValue(form);Pump(session.Check());
                 Capture(form,Path.Combine(root,"tests","window-updates-current.png"));
             }
@@ -386,6 +455,56 @@ namespace ZapretDesktop {
                     }
                 }
             }finally{store.Settings.AutoAppUpdates=previous;}
+        }
+        static void AutomaticUpdateTests(string root,string official) {
+            string folder=Path.Combine(root,"tests","fixture-auto-update-"+Guid.NewGuid().ToString("N"));var store=new Store(folder);Copy(official,store.Current);
+            store.Settings.AutoAppUpdates=false;store.Settings.CheckUpdates=false;store.Save();
+            var flags=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic;
+            try {
+                Assert(!new Store(folder).Settings.AutoInstallShell && !new Store(folder).Settings.AutoInstallCore,"Automatic installation is opt-in for both components, including old settings");
+                // A harmless fixture representing an old installation. Never
+                // execute its binaries or request elevation.
+                File.WriteAllText(Path.Combine(store.Current,"service.bat"),"set LOCAL_VERSION=1.10.2\n");
+                File.WriteAllText(Path.Combine(store.Current,"lists","list-general-user.txt"),"friend.example\n");
+                byte[] archive=File.ReadAllBytes(Path.Combine(root,"downloads","zapret-discord-youtube-1.10.3.zip"));
+                string metadata=new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(new{tag_name="1.10.3",body="fixture",assets=new[]{new{name="zapret-discord-youtube-1.10.3.zip",browser_download_url="https://github.com/Flowseal/zapret-discord-youtube/releases/download/1.10.3/zapret-discord-youtube-1.10.3.zip",digest="sha256:"+Updater.Hash(Path.Combine(root,"downloads","zapret-discord-youtube-1.10.3.zip")),size=archive.Length}}});
+                int downloads=0;
+                var coreHttp=new MockHttp{Reply=url=>{if(url.EndsWith("/releases/latest"))return Response(200,metadata);downloads++;return new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK){Content=new System.Net.Http.ByteArrayContent(archive)};}};
+                Exception failure=null;
+                // Use the real WinForms message loop on an isolated STA thread,
+                // rather than mixing archive continuations with DoEvents probes.
+                var worker=new Thread(()=>{
+                    try {
+                        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
+                        var shellHttp=new MockHttp{Reply=url=>Response(200,url.EndsWith("update.json")?Feed("99.0.0"):new string('x',123))};int confirmations=0;
+                        using(var form=new MainForm(store,false,false,false,false,new ShellUpdates(shellHttp),(title,message)=>{confirmations++;return false;},new Updater(store,coreHttp))) {
+                            form.StartPosition=FormStartPosition.Manual;form.Location=new Point(-2500,-2500);
+                            form.Shown+=async(s,e)=>{
+                                try {
+                                    FindTabs(form).SelectedIndex=2;var toggle=AllControls(form).OfType<AppUpdateCard>().Single().AutoInstall;
+                                    toggle.Checked=true;var saved=new Store(folder);
+                                    Assert(saved.Settings.AutoInstallShell && saved.Settings.AutoAppUpdates && !saved.Settings.AutoInstallCore,"Shell switch persists independently and enables startup checks");
+                                    await (Task)typeof(MainForm).GetMethod("CheckShell",flags).Invoke(form,new object[]{true});
+                                    var session=(AppUpdateSession)typeof(MainForm).GetField("appUpdates",flags).GetValue(form);
+                                    Assert(shellHttp.Calls==2 && confirmations==0 && session.State==AppUpdateState.Failed && session.Prepared==null,"Opted-in shell update downloads automatically without confirmation and rejects a bad archive");
+                                    toggle.Checked=false;
+                                    await (Task)typeof(MainForm).GetMethod("CheckUpdates",flags).Invoke(form,new object[]{true});
+                                    Assert(downloads==0,"Core startup check cannot download without the automatic-install setting");
+                                    var coreToggle=(CheckBox)typeof(MainForm).GetField("autoInstallCore",flags).GetValue(form);coreToggle.Checked=true;
+                                    Assert(new Store(folder).Settings.AutoInstallCore && !new Store(folder).Settings.AutoInstallShell,"Core switch persists separately from shell installation");
+                                    await (Task)typeof(MainForm).GetMethod("CheckUpdates",flags).Invoke(form,new object[]{true});
+                                    Assert(downloads==1 && confirmations==0 && Updater.Version(store.Current)=="1.10.3" && Trust.VerifyEngine(store.Current)!=null,"Opted-in core update downloads and installs the pinned verified archive without a confirmation dialog");
+                                    Assert(File.ReadAllText(Path.Combine(store.Current,"lists","list-general-user.txt"))=="friend.example\n" && !String.IsNullOrEmpty(store.Settings.PreviousEngine),"Automatic core installation preserves user lists and the previous version");
+                                    coreToggle.Checked=false;
+                                }catch(Exception ex){failure=ex;}
+                                finally{typeof(MainForm).GetField("exiting",flags).SetValue(form,true);form.Close();}
+                            };
+                            Application.Run(form);
+                        }
+                    }catch(Exception ex){failure=ex;}
+                });worker.IsBackground=true;worker.SetApartmentState(ApartmentState.STA);worker.Start();
+                Assert(worker.Join(60000),"Automatic update finishes in the real WinForms message loop");if(failure!=null)throw failure;
+            }finally{RemoveFixture(folder);}
         }
         static void ShellRollbackTest(string root){
             string folder=Path.Combine(root,"tests","fixture-rollback-"+Guid.NewGuid().ToString("N")),stage=Path.Combine(folder,"data","app-updates","probe");Directory.CreateDirectory(stage);
@@ -510,6 +629,14 @@ namespace ZapretDesktop {
             selected=await StrategySelector.Run(new[]{"broken","partial"},(name,token)=>{if(name=="broken")throw new IOException("fixture error");running=name;return Task.FromResult(0);},()=>running=null,
                 token=>Task.FromResult(results(4,10)),CancellationToken.None,null,null);
             Assert(selected.Winner==null && selected.Candidates.Count==2 && running==null,"Start errors do not interrupt full scan and partial candidates are not auto-selected");
+            int attempts=0;bool setupStopped=false;
+            try{await StrategySelector.Run(new[]{"a","b","c"},(name,token)=>{attempts++;throw new EngineSetupException("fixture access denied");},()=>running=null,
+                token=>{throw new Exception("Network checks must not run without a core");},CancellationToken.None,null,null);}catch(EngineSetupException){setupStopped=true;}
+            Assert(setupStopped && attempts==1 && running==null,"Shared preparation failure stops scan after one attempt instead of failing every row");
+            attempts=0;setupStopped=false;
+            try{await StrategySelector.Run(new[]{"a","b"},(name,token)=>{if(++attempts==2)throw new EngineSetupException("fixture reconnect failure");running=name;return Task.FromResult(0);},()=>running=null,
+                token=>Task.FromResult(results(5,10)),CancellationToken.None,null,null,true);}catch(EngineSetupException){setupStopped=true;}
+            Assert(setupStopped && attempts==2 && running==null,"Preparation failure during winner confirmation also stops and cleans up");
             var dns=ServiceChecks.FromException(new System.Net.Http.HttpRequestException("outer",new System.Net.WebException("DNS",System.Net.WebExceptionStatus.NameResolutionFailure)),42);
             Assert(dns.Failure=="dns" && dns.Milliseconds==42,"Typed nested DNS error classified");
             Assert(ServiceChecks.FromException(new System.Net.Http.HttpRequestException("dns text only"),0).Failure=="connection","Error message alone does not imply DNS failure");

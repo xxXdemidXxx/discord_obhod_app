@@ -61,14 +61,17 @@ namespace ZapretDesktop {
                 if(!response.WaitOne(15000)){connected=false;pipe.Dispose();running=false;throw new IOException("Компонент запуска не ответил.");}
                 if(reply==null)throw new IOException("Связь с компонентом запуска прервана.",failure);
                 running=Convert.ToBoolean(reply["running"]);string error=(string)reply["error"];
-                if(error.Length>0)throw new InvalidOperationException(error);
+                if(error.Length>0){object kind;if(reply.TryGetValue("error_kind",out kind) && (string)kind=="setup")throw new EngineSetupException("Не удалось подготовить ядро.\n"+error);throw new EngineStartException(error);}
             }
         }
         public void Start(string engine,string strategy) {
             lock(gate) {
-            Trust.VerifyEngine(engine);
-            if(!String.Equals(Path.GetDirectoryName(Path.GetFullPath(engine)),Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"data","engines").TrimEnd('\\'),StringComparison.OrdinalIgnoreCase))throw new InvalidDataException("Ядро должно находиться в папке приложения.");
-            Connect();Ask("start",Path.GetFileName(engine),strategy);
+            try {
+                Trust.VerifyEngine(engine);
+                if(!String.Equals(Path.GetDirectoryName(Path.GetFullPath(engine)),Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"data","engines").TrimEnd('\\'),StringComparison.OrdinalIgnoreCase))throw new InvalidDataException("Ядро должно находиться в папке приложения.");
+                Connect();
+            }catch(Exception ex){throw new EngineSetupException("Не удалось подготовить запуск ядра.\n"+ex.Message,ex);}
+            try{Ask("start",Path.GetFileName(engine),strategy);}catch(IOException ex){throw new EngineSetupException("Не удалось связаться с компонентом запуска. Повторите запуск ByPass.\n"+ex.Message,ex);}
             }
         }
         public void Stop(){if(connected)Ask("stop",null,null);running=false;}
