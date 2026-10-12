@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 function Get-ByPassSigningKey {
     param([string]$KeyPath = (Join-Path $env:LOCALAPPDATA 'ByPass\Signing\release.key'))
-    if (-not (Test-Path -LiteralPath $KeyPath)) { throw 'Offline signing key is missing. Run tools/initialize-signing.ps1 on the release owner computer.' }
+    if (-not (Test-Path -LiteralPath $KeyPath)) { throw 'Local release key is missing. Import the existing encrypted backup with owner.cmd or tools/import-signing-key.ps1. Do not generate a replacement key.' }
     $protected = [IO.File]::ReadAllBytes($KeyPath)
     $plain = [Security.Cryptography.ProtectedData]::Unprotect($protected, $null, [Security.Cryptography.DataProtectionScope]::CurrentUser)
     try {

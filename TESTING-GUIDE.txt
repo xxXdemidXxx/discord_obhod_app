@@ -1,4 +1,4 @@
-ByPass 0.5.2 — КАК ЗАПУСТИТЬ
+ByPass 0.5.3 — КАК ЗАПУСТИТЬ
 
 1. Скачайте ByPass-win-x64.zip:
    https://github.com/xxXdemidXxx/discord_obhod_app/releases/latest/download/ByPass-win-x64.zip
