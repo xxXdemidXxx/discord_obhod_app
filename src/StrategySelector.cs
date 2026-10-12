@@ -19,17 +19,17 @@ namespace ZapretDesktop {
             finally{if(!keep)stop();}
             if(completed!=null)completed(candidate);return keep;
         }
-        public static async Task<SelectionResult> Run(string[] strategies,Func<string,CancellationToken,Task> start,Action stop,Func<CancellationToken,Task<CheckResult[]>> check,CancellationToken token,Action<int,int,string> progress,Action<CandidateResult> completed,bool firstMatch=false,Func<CancellationToken,Task<CheckResult[]>> confirmation=null){
+        public static async Task<SelectionResult> Run(string[] strategies,Func<string,CancellationToken,Task> start,Action stop,Func<CancellationToken,Task<CheckResult[]>> check,CancellationToken token,Action<int,int,string> progress,Action<CandidateResult> completed,bool firstMatch=false,Func<CancellationToken,Task<CheckResult[]>> confirmation=null,string preferred=null){
             var selection=new SelectionResult();bool keep=false;
             try{
                 for(int i=0;i<strategies.Length;i++){
                     token.ThrowIfCancellationRequested();stop();var candidate=new CandidateResult{Strategy=strategies[i]};if(progress!=null)progress(i+1,strategies.Length,candidate.Strategy);
                     try{await start(candidate.Strategy,token);candidate.Results=await check(token);}catch(OperationCanceledException){throw;}catch(EngineSetupException){throw;}catch(Exception ex){candidate.Error=ex.Message;}finally{stop();}
                     selection.Candidates.Add(candidate);if(completed!=null)completed(candidate);
-                    if(firstMatch && candidate.Complete){if(progress!=null)progress(i+1,strategies.Length,"Подтверждение: "+candidate.Strategy);keep=await Confirm(candidate,start,stop,confirmation??check,token,completed);if(keep){selection.Winner=candidate;return selection;}}
+                    if(firstMatch && candidate.Complete){if(progress!=null)progress(i+1,strategies.Length,"Повторные пробы: "+candidate.Strategy);keep=await Confirm(candidate,start,stop,confirmation??check,token,completed);if(keep){selection.Winner=candidate;return selection;}}
                 }
-                if(!firstMatch)foreach(var candidate in selection.Candidates.Where(x=>x.Complete).OrderBy(x=>x.Latency).ToArray()){
-                    token.ThrowIfCancellationRequested();if(progress!=null)progress(strategies.Length,strategies.Length,"Подтверждение: "+candidate.Strategy);keep=await Confirm(candidate,start,stop,confirmation??check,token,completed);if(keep){selection.Winner=candidate;break;}
+                if(!firstMatch)foreach(var candidate in selection.Candidates.Where(x=>x.Complete).OrderBy(x=>String.Equals(x.Strategy,preferred,StringComparison.OrdinalIgnoreCase)?0:1).ThenBy(x=>x.Latency).ToArray()){
+                    token.ThrowIfCancellationRequested();if(progress!=null)progress(strategies.Length,strategies.Length,"Повторные пробы: "+candidate.Strategy);keep=await Confirm(candidate,start,stop,confirmation??check,token,completed);if(keep){selection.Winner=candidate;break;}
                 }
                 return selection;
             }finally{if(!keep)stop();}

@@ -39,7 +39,7 @@ namespace ZapretDesktop {
     public sealed partial class MainForm : Form {
         [DllImport("user32.dll")] static extern bool ReleaseCapture();
         [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr handle, int message, IntPtr wParam, IntPtr lParam);
-        readonly Store store; readonly EngineRunner runner = new EngineRunner(); readonly Updater updater;
+        readonly Store store; readonly StrategyFeedback strategyFeedback; readonly EngineRunner runner = new EngineRunner(); readonly Updater updater;
         readonly Color background = Theme.Background, card = Theme.Surface, muted = Theme.Muted, accent = Theme.Accent;
         Label state, subtitle, version, updateText; Button connect, install, rollback, check;
         DarkSelect profiles, categories, games; CheckBox autoCheck; TextBox tcp, udp, log;
@@ -60,7 +60,7 @@ namespace ZapretDesktop {
         NotifyIcon tray; System.Windows.Forms.Timer timer;
         Release release; bool busy, exiting, loading;
         public MainForm(Store store, bool start, bool auto = false, bool restoreConnection = false, bool fullScan = false, ShellUpdates shellUpdates = null, Func<string,string,bool> updateConfirmation = null,Updater coreUpdates=null) {
-            this.store = store; updater = coreUpdates??new Updater(store);appUpdates=new AppUpdateSession(shellUpdates??new ShellUpdates());
+            this.store = store; strategyFeedback=new StrategyFeedback(store); updater = coreUpdates??new Updater(store);appUpdates=new AppUpdateSession(shellUpdates??new ShellUpdates());
             confirmUpdate=updateConfirmation??((title,message)=>MessageBox.Show(this,message,title,MessageBoxButtons.YesNo,MessageBoxIcon.Question,MessageBoxDefaultButton.Button2)==DialogResult.Yes);
             activeStrategy = store.Settings.Strategy;
             BuildInterface();
@@ -169,7 +169,7 @@ namespace ZapretDesktop {
         async Task StartEngine(string strategy,CancellationToken token) {
             token.ThrowIfCancellationRequested();await Task.Delay(150,token);
             activeStrategy=strategy;await Task.Run(()=>runner.Start(store.Current,strategy));RefreshState();
-            try{await EngineRunner.WaitForReady(()=>runner.Running,()=>runner.Ready,token);}catch{runner.Stop();throw;}
+            try{await EngineRunner.WaitForReady(()=>runner.Running,()=>runner.Ready,token,10000,()=>runner.DriverFailure);}catch{runner.Stop();throw;}
             if(!runner.Running)throw new IOException("Ядро завершилось после запуска. Подробности в журнале.");
         }
         void InvalidateChecks(string reason) {checkEpoch++;dashboard.ClearResults(reason);}
@@ -186,7 +186,8 @@ namespace ZapretDesktop {
             bool quick=dashboard.ScanMode.SelectedIndex==0;
             try{Strategy.ValidateEngine(store.Current);Trust.VerifyEngine(store.Current);}catch(Exception ex){Error(new EngineSetupException("Не удалось подготовить ядро.\n"+ex.Message,ex));return;}
             scanning=true;stopAfterScan=false;scanCancellation=new CancellationTokenSource();var token=scanCancellation.Token;
-            var names=store.Strategies();dashboard.ResetHistory(names);RefreshState();bool chosen=false;
+            var names=strategyFeedback.Order(store.Strategies(),original);dashboard.ResetHistory(names);RefreshState();bool chosen=false,setupFailed=false;
+            Append("Порядок подбора: "+String.Join(" → ",names));
             try {
                 InvalidateChecks("Автоподбор начинается…");await StopChecks();runner.Stop();
                 var result=await StrategySelector.Run(names,
@@ -194,30 +195,43 @@ namespace ZapretDesktop {
                     ()=>runner.Stop(),
                     async cancel=>await ServiceChecks.Batch(cancel,(index,item)=>{if(!IsDisposed)dashboard.SetResult(index,item);},quick?6:12),token,
                     (index,total,name)=>{if(IsDisposed)return;scanStep=index+" / "+total+" · "+Theme.StrategyName(name);dashboard.ScanSummary.Text=scanStep;dashboard.Progress(name);RefreshState();},
-                    candidate=>{if(IsDisposed)return;dashboard.Record(candidate);checkSummary.Text=candidate.Strategy.Replace(".bat","")+" · "+candidate.Passed+"/"+ServiceChecks.Targets.Length;Append("Автоподбор: "+candidate.Strategy+" · "+candidate.Passed+"/"+ServiceChecks.Targets.Length+(candidate.Error.Length>0?" · "+candidate.Error:""));for(int i=0;i<candidate.Results.Length;i++)Append("  "+ServiceChecks.Targets[i].Name+": "+candidate.Results[i].Detail+" · "+candidate.Results[i].Milliseconds+" мс");},quick,async cancel=>await ServiceChecks.Batch(cancel,(index,item)=>{if(!IsDisposed)dashboard.SetResult(index,item);}));
+                    candidate=>{if(IsDisposed)return;dashboard.Record(candidate);checkSummary.Text=candidate.Strategy.Replace(".bat","")+" · "+candidate.Passed+"/"+ServiceChecks.Targets.Length;Append("Автоподбор: "+candidate.Strategy+" · "+candidate.Passed+"/"+ServiceChecks.Targets.Length+(candidate.Error.Length>0?" · "+candidate.Error:""));for(int i=0;i<candidate.Results.Length;i++)Append("  "+ServiceChecks.Targets[i].Name+": "+candidate.Results[i].Detail+" · "+candidate.Results[i].Milliseconds+" мс");},quick,async cancel=>await ServiceChecks.Batch(cancel,(index,item)=>{if(!IsDisposed)dashboard.SetResult(index,item);}),strategyFeedback.Preferred(original));
                 if(result.Winner!=null) {
                     store.Settings.Strategy=result.Winner.Strategy;store.Save();activeStrategy=result.Winner.Strategy;chosen=true;
                     loading=true;categories.SelectedIndex=0;profiles.Items.Clear();profiles.Items.AddRange(names);profiles.SelectedItem=activeStrategy;loading=false;
                     for(int i=0;i<result.Winner.Results.Length;i++)dashboard.SetResult(i,result.Winner.Results[i]);
-                    checkSummary.Text="Все сетевые проверки пройдены";
-                    dashboard.ScanSummary.Text="Найден рабочий вариант: "+Theme.StrategyName(activeStrategy);
+                    checkSummary.Text="Сетевые пробы пройдены · проверьте Discord";
+                    dashboard.ScanSummary.Text="Выбран для проверки: "+Theme.StrategyName(activeStrategy);
                 }else {
                     bool dnsFailure=result.Candidates.Any(x=>x.Results.Any(y=>y.Failure=="dns"));
                     dashboard.ScanSummary.Text="Полного результата не найдено."+(dnsFailure?"\nЕсть ошибки DNS — откройте диагностику.":"\nРезультаты всех стратегий — в таблице.");
                 }
             }catch(OperationCanceledException){if(!IsDisposed)dashboard.ScanSummary.Text="Автоподбор отменён.";}
-            catch(Exception ex){if(!IsDisposed){dashboard.ScanSummary.Text=ex is EngineSetupException?"Подбор остановлен: не удалось запустить ядро.\nПодробности — в журнале.":"Автоподбор завершился с ошибкой.";Error(ex);}}
+            catch(Exception ex){setupFailed=ex is EngineSetupException;if(!IsDisposed){dashboard.ScanSummary.Text=ex is EngineSetupException?"Подбор остановлен: не удалось запустить ядро.\nПодробности — в журнале.":"Автоподбор завершился с ошибкой.";Error(ex);}}
             {
                 if(!chosen) {
                     try {
                         runner.Stop();activeStrategy=original;store.Settings.Strategy=original;
-                        if(!IsDisposed && !pendingExit && !stopAfterScan && wasRunning){await StartEngine(original,CancellationToken.None);InvalidateChecks("Возвращена "+original.Replace(".bat","")+" · проверка требуется заново");}
+                        if(!IsDisposed && !pendingExit && !stopAfterScan && !setupFailed && wasRunning && !strategyFeedback.IsRejected(original)){await StartEngine(original,CancellationToken.None);InvalidateChecks("Возвращена "+original.Replace(".bat","")+" · проверка требуется заново");}
                         else if(!IsDisposed)InvalidateChecks("Обход выключен · выберите стратегию из таблицы");
                     }catch(Exception ex){if(!IsDisposed)Append("Восстановление стратегии: "+ex.Message);}
                 }
                 scanning=false;scanCancellation.Dispose();scanCancellation=null;
                 if(!IsDisposed){RefreshState();if(pendingExit)Exit();}
             }
+        }
+        void ConfirmStrategy() {
+            if(!runner.Running || !runner.Ready || scanning || starting || testing || busy)return;
+            strategyFeedback.Accept(activeStrategy);
+            checkSummary.Text="Вы подтвердили работу: "+Theme.StrategyName(activeStrategy);
+            dashboard.ScanSummary.Text="Подтверждённый вариант сохранён.";
+            Append("Пользователь подтвердил работу стратегии: "+activeStrategy);
+        }
+        async Task NextStrategy() {
+            if(!runner.Running || scanning || starting || testing || busy)return;
+            strategyFeedback.Reject(activeStrategy);
+            Append("Пользователь отклонил стратегию: "+activeStrategy+" · продолжаем подбор");
+            await StopChecks();runner.Stop();await AutoSelect(false);
         }
         async Task CheckUpdates(bool quiet) {
             if (busy || scanning || checkingUpdates) return; checkingUpdates = true; RefreshState();
@@ -240,7 +254,7 @@ namespace ZapretDesktop {
             dashboard.ClearResults("Проверяем: "+engineState+"…");RefreshState();
             try {
                 var results=await ServiceChecks.Batch(token,(index,item)=>{if(IsDisposed || epoch!=checkEpoch)return;dashboard.SetResult(index,item);Append(ServiceChecks.Targets[index].Name+": "+item.Detail+" · "+item.Milliseconds+" мс");});
-                if(!IsDisposed && epoch==checkEpoch){checkSummary.Text="Доступно: "+results.Count(x=>x.State==1)+" из "+ServiceChecks.Targets.Length+(!runner.Running && !runner.Conflict?" · обход выключен":"");if(results.Any(x=>x.Failure=="dns"))dashboard.ScanSummary.Text="Есть ошибка DNS.\nНажмите «Диагностика DNS».";}
+                if(!IsDisposed && epoch==checkEpoch){checkSummary.Text="Сетевых проб: "+results.Count(x=>x.State==1)+" из "+ServiceChecks.Targets.Length+(!runner.Running && !runner.Conflict?" · обход выключен":results.All(x=>x.State==1)?" · проверьте Discord":"");if(results.Any(x=>x.Failure=="dns"))dashboard.ScanSummary.Text="Есть ошибка DNS.\nНажмите «Диагностика DNS».";}
             }catch(OperationCanceledException){}catch(Exception ex){if(!IsDisposed)Error(ex);}
             finally{testing=false;localCancellation.Dispose();if(checkCancellation==localCancellation)checkCancellation=null;if(!IsDisposed)RefreshState();}
         }
@@ -277,11 +291,12 @@ namespace ZapretDesktop {
             if(previouslyOn && !on && !scanning && !starting && !exiting) { InvalidateChecks("Ядро остановлено · проверка требуется заново"); if(checkCancellation!=null)checkCancellation.Cancel(); }
             previouslyOn=on;
             state.Text = scanning ? "Подбираем стратегию" : on ? "Обход включён" : (external ? "Другой обход запущен" : "Обход выключен"); state.ForeColor=on?Theme.Success:external?Theme.Warning:Theme.Text;
-            subtitle.Text = scanning ? (scanStep.Length>0?scanStep:"Ищем рабочий вариант…") : on ? Theme.StrategyName(activeStrategy) : (external ? "Закройте другой обход, чтобы управлять подключением здесь" : "Выберите вариант или нажмите «Подобрать автоматически»");
+            subtitle.Text = scanning ? (scanStep.Length>0?scanStep:"Проверяем сетевые пробы…") : on ? Theme.StrategyName(activeStrategy) : (external ? "Закройте другой обход, чтобы управлять подключением здесь" : "Выберите вариант или нажмите «Подобрать автоматически»");
             connect.Text = scanning ? "Остановить подбор" : starting ? "Запуск…" : (on ? "Выключить" : (external ? "Внешний winws" : "Включить")); connect.Enabled = !busy && !external && !starting;
             profiles.Enabled = categories.Enabled = !busy && !starting && !scanning;
             games.Enabled = tcp.Enabled = udp.Enabled = saveGameButton.Enabled = !on && !external && !busy && !starting && !scanning; domainEditor.SetAllowed(!external && !busy && !starting && !scanning,on);
             dashboard.ScanMode.Enabled = !busy && !starting && !scanning;
+            dashboard.SetFeedback(on && runner.Ready && !busy && !starting && !scanning && !testing && !dnsBusy && !exiting);
             dashboard.Apply.Enabled = dashboard.Scan.Enabled = !busy && !external && !starting && !scanning && !testing && !dnsBusy;
             dashboard.Cancel.Enabled = scanning && scanCancellation!=null && !scanCancellation.IsCancellationRequested;
             dashboard.Dns.Enabled = !busy && !starting && !scanning && !dnsBusy;

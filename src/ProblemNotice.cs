@@ -12,6 +12,8 @@ namespace ZapretDesktop {
             var windows=cause as Win32Exception;
             if(windows!=null && windows.NativeErrorCode==1223)
                 return "Запуск отменён в окне Windows.\nЧтобы включить обход, повторите запуск и подтвердите запрос Windows.";
+            if(error is EngineDriverException)
+                return "Windows не смогла запустить драйвер WinDivert. Подбор остановлен.\nПерезагрузите компьютер и повторите запуск. Если ошибка останется, сохраните журнал.";
             if(error is EngineSetupException && cause is InvalidDataException)
                 return "Не удалось проверить файлы программы.\nСкачайте полный ZIP ByPass и распакуйте его в новую папку.";
             if(error is EngineSetupException)

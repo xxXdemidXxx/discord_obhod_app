@@ -119,6 +119,10 @@ namespace ZapretDesktop {
                                         HostWire.AsCaller(parent,()=>{inputs=ReadInputs(source);});
                                         if(preparedVersion!=null && preparedVersion!=version){snapshot=Path.Combine(HostWire.ProtectedRoot,"runtime-"+Guid.NewGuid().ToString("N"));HostWire.ProtectDirectory(snapshot);snapshots.Add(snapshot);preparedVersion=null;}
                                         WriteSnapshot(snapshot,inputs,preparedVersion!=null);preparedVersion=version;
+                                        var driverPaths=RegisteredDriverPaths();
+                                        foreach(string driverPath in driverPaths)HostWire.Write(pipe,new{type="log",text="WinDivert: зарегистрированный путь "+driverPath+" · файл "+(File.Exists(NormalizeDriverPath(driverPath))?"есть":"отсутствует")});
+                                        foreach(string repaired in RestoreDriverFiles(HostWire.ProtectedRoot,inputs,driverPaths))
+                                            HostWire.Write(pipe,new{type="log",text="Восстановлен проверенный драйвер ByPass: "+repaired});
                                         preparing=false;runner.Start(snapshot,strategy);break;
                                     case "stop":runner.Stop();break;
                                     case "status":break;
@@ -128,9 +132,65 @@ namespace ZapretDesktop {
                                 HostWire.Write(pipe,new{type="reply",running=runner.Running,error=""});
                             }catch(Exception ex){HostWire.Write(pipe,new{type="reply",running=runner.Running,error=ex.Message,error_kind=preparing?"setup":"strategy"});}
                         }
-                    }finally{runner.Stop();foreach(string folder in snapshots)try{Directory.Delete(folder,true);}catch{}}
+                    }finally{runner.Stop();foreach(string folder in snapshots)try{CleanupSnapshot(folder,RegisteredDriverPaths());}catch{}}
                 }
             }
+        }
+        // WinDivert reuses an existing driver's registered ImagePath. Keep that
+        // file alive, and repair only a missing, trusted driver in our own runtime.
+        internal static string NormalizeDriverPath(string path) {
+            path=Environment.ExpandEnvironmentVariables(path??"").Trim().Trim('"');
+            if(path.StartsWith(@"\??\",StringComparison.Ordinal))path=path.Substring(4);
+            return path;
+        }
+        static string[] RegisteredDriverPaths() {
+            var result=new List<string>();
+            using(var services=Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services",false)) {
+                if(services==null)throw new IOException("Не удалось прочитать пути драйверов Windows.");
+                foreach(string name in services.GetSubKeyNames().Where(x=>x.StartsWith("WinDivert",StringComparison.OrdinalIgnoreCase))) {
+                    using(var service=services.OpenSubKey(name,false)) {
+                        if(service==null)throw new IOException("Не удалось прочитать службу "+name);
+                        if(Convert.ToInt32(service.GetValue("Type",0))!=1)continue;
+                        string image=service.GetValue("ImagePath",null,Microsoft.Win32.RegistryValueOptions.DoNotExpandEnvironmentNames) as string;
+                        if(!String.IsNullOrEmpty(image))result.Add(image);
+                    }
+                }
+            }
+            return result.ToArray();
+        }
+        internal static string OwnedDriver(string root,string registered) {
+            string path=NormalizeDriverPath(registered);
+            if(!Path.IsPathRooted(path))return null;
+            path=Path.GetFullPath(path);string prefix=Path.GetFullPath(root).TrimEnd('\\')+"\\";
+            if(!path.StartsWith(prefix,StringComparison.OrdinalIgnoreCase))return null;
+            string relative=path.Substring(prefix.Length);
+            return System.Text.RegularExpressions.Regex.IsMatch(relative,@"^runtime-[0-9a-f]{32}\\bin\\WinDivert(32|64)\.sys$",System.Text.RegularExpressions.RegexOptions.IgnoreCase)?path:null;
+        }
+        internal static string[] RestoreDriverFiles(string root,Dictionary<string,byte[]> verifiedInputs,IEnumerable<string> registered) {
+            var restored=new List<string>();
+            foreach(string image in registered) {
+                string path=OwnedDriver(root,image);if(path==null || File.Exists(path))continue;
+                byte[] bytes;if(!verifiedInputs.TryGetValue("bin/"+Path.GetFileName(path),out bytes))continue;
+                Trust.NoLinks(path);
+#if TESTING
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+#else
+                HostWire.ProtectDirectory(root);HostWire.ProtectDirectory(Path.GetDirectoryName(Path.GetDirectoryName(path)));HostWire.ProtectDirectory(Path.GetDirectoryName(path));
+#endif
+                using(var file=new FileStream(path,FileMode.CreateNew,FileAccess.Write,FileShare.Read))file.Write(bytes,0,bytes.Length);
+#if !TESTING
+                HostWire.ProtectFile(path);
+#endif
+                restored.Add(path);
+            }
+            return restored.ToArray();
+        }
+        internal static void CleanupSnapshot(string snapshot,IEnumerable<string> registered) {
+            Trust.NoLinks(snapshot);
+            var keep=new HashSet<string>(registered.Select(x=>OwnedDriver(Path.GetDirectoryName(snapshot),x)).Where(x=>x!=null),StringComparer.OrdinalIgnoreCase);
+            foreach(string file in Trust.Files(snapshot).ToArray())if(!keep.Contains(Path.GetFullPath(file)))try{File.Delete(file);}catch{}
+            foreach(string directory in Directory.GetDirectories(snapshot,"*",SearchOption.AllDirectories).OrderByDescending(x=>x.Length))try{Directory.Delete(directory,false);}catch{}
+            try{Directory.Delete(snapshot,false);}catch{}
         }
         internal static void WriteSnapshot(string snapshot,Dictionary<string,byte[]> inputs,bool reuse) {
             // WinDivert can keep its driver mapped after winws exits. Reuse the

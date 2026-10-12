@@ -8,8 +8,16 @@ using System.Text.RegularExpressions;
 using System.Web.Script.Serialization;
 
 namespace ZapretDesktop {
-    public sealed class EngineSetupException : Exception {
+    public class EngineSetupException : Exception {
         public EngineSetupException(string message,Exception inner=null):base(message,inner){}
+    }
+    public sealed class EngineDriverException : EngineSetupException {
+        public EngineDriverException(string message):base(message){}
+        internal static bool IsFailure(string line) {
+            return line.IndexOf("windivert: error opening filter:",StringComparison.OrdinalIgnoreCase)>=0 &&
+                line.IndexOf("parameter is incorrect",StringComparison.OrdinalIgnoreCase)<0 &&
+                line.IndexOf("параметр задан неверно",StringComparison.OrdinalIgnoreCase)<0;
+        }
     }
     public sealed class EngineStartException : Exception {
         public EngineStartException(string message):base(message){}
@@ -18,6 +26,8 @@ namespace ZapretDesktop {
         public string Engine = "1.10.3";
         public string PreviousEngine = "";
         public string Strategy = "general.bat";
+        public string WorkingStrategy = "";
+        public string WorkingStrategyEngine = "";
         public bool CheckUpdates = true;
         public bool AutoAppUpdates = true;
         public bool AutoInstallShell = false;

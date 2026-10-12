@@ -170,7 +170,7 @@ namespace ZapretDesktop {
                 var root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".."));
                 var local = Path.GetFullPath(Path.Combine(root, "..", "zapret-discord-youtube-1.10.2"));
                 var official = Path.Combine(root, "downloads", "official-1.10.3", "zapret-discord-youtube-1.10.3");
-                local=official;SecurityTests(root,official);LegacyMigrationTest(root); SelectionTests().GetAwaiter().GetResult(); ServiceProbeTests().GetAwaiter().GetResult(); DomainTests(root); UpdateFeedTests().GetAwaiter().GetResult(); AppUpdateSessionTests(root).GetAwaiter().GetResult(); StageTests(root).GetAwaiter().GetResult(); ShellReplacementTest(root); ShellRollbackTest(root); ShellHandshakeTest(root);
+                local=official;SecurityTests(root,official);LegacyMigrationTest(root); FeedbackAndDriverTests(root,official).GetAwaiter().GetResult(); SelectionTests().GetAwaiter().GetResult(); ServiceProbeTests().GetAwaiter().GetResult(); DomainTests(root); UpdateFeedTests().GetAwaiter().GetResult(); AppUpdateSessionTests(root).GetAwaiter().GetResult(); StageTests(root).GetAwaiter().GetResult(); ShellReplacementTest(root); ShellRollbackTest(root); ShellHandshakeTest(root);
                 foreach (var engine in new[] {local, official}.Distinct()) {
                     Strategy.ValidateEngine(engine);
                     var profiles = Directory.GetFiles(engine, "general*.bat"); Assert(profiles.Length == 22, "22 upstream profiles expected");
@@ -532,6 +532,10 @@ namespace ZapretDesktop {
             Assert(popup!=null && popup.Visible,"Custom strategy dropdown opens");
             using(var image=new Bitmap(popup.Width,popup.Height)){popup.DrawToBitmap(image,new Rectangle(Point.Empty,popup.Size));image.Save(Path.Combine(root,"tests","window-dropdown.png"));}
             dashboard.Profiles.Choose(1);Assert(dashboard.Profiles.SelectedIndex==1,"Custom strategy dropdown applies item selection");dashboard.Profiles.SelectedIndex=0;
+            dashboard.SetFeedback(true);Application.DoEvents();
+            Assert(dashboard.Works.Visible && dashboard.Next.Visible && !dashboard.Works.Bounds.IntersectsWith(dashboard.Next.Bounds),"Actual-client feedback buttons are visible and do not overlap");
+            using(var image=new Bitmap(form.Width,form.Height)){form.DrawToBitmap(image,new Rectangle(Point.Empty,form.Size));image.Save(Path.Combine(root,"tests","window-feedback.png"));}
+            dashboard.SetFeedback(false);
             tabs.SelectedIndex=tabs.TabPages.FindIndex(x=>AllControls(x).OfType<DomainEditor>().Any());var editor=AllControls(form).OfType<DomainEditor>().Single();editor.TextEditor.Text=String.Join("\r\n",Enumerable.Range(1,100).Select(i=>"site-"+i+".example"));Application.DoEvents();
             Assert(editor.Dirty && AllControls(editor).OfType<SlimScroll>().Any(x=>x.Visible),"Editor tracks unsaved text and shows thin scrollbar for long lists");
             using(var image=new Bitmap(form.Width,form.Height)){form.DrawToBitmap(image,new Rectangle(Point.Empty,form.Size));image.Save(Path.Combine(root,"tests","window-domain-scroll.png"));}
@@ -714,6 +718,53 @@ namespace ZapretDesktop {
             var partial=Enumerable.Range(0,ServiceChecks.Targets.Length).Select(i=>new CheckResult{State=i==4?0:1}).ToArray();
             var selected=await StrategySelector.Run(new[]{"api-only"},(name,token)=>Task.FromResult(0),()=>{},token=>Task.FromResult(partial),CancellationToken.None,null,null,true);
             Assert(selected.Winner==null,"Strategy with website and Gateway working but updater blocked is not auto-selected");
+        }
+        static async Task FeedbackAndDriverTests(string root,string official) {
+            string folder=Path.Combine(root,"tests","fixture-feedback-"+Guid.NewGuid().ToString("N"));
+            var store=new Store(folder);Copy(official,store.Current);var feedback=new StrategyFeedback(store);
+            string alt3="general (ALT3).bat",alt9="general (ALT9).bat";
+            try {
+                var names=store.Strategies();
+                Assert(feedback.Order(names,alt9)[0]==alt9,"Existing manually selected ALT9 precedes ALT3 without hardcoding a winner");
+                feedback.Accept(alt9);
+                Assert(new StrategyFeedback(new Store(folder)).Working==alt9,"User-confirmed strategy persists across application restart");
+                Assert(feedback.Order(names,alt3)[0]==alt9,"Confirmed working strategy has priority over another current selection");
+                feedback.Reject(alt3);Assert(!feedback.Order(names,alt3).Contains(alt3),"Rejected false-positive ALT3 is skipped by continued selection");
+                feedback.Reject(alt9);Assert(feedback.Working=="" && new Store(folder).Settings.WorkingStrategy=="","Rejecting a previously accepted strategy removes its confirmation");
+                feedback.ResetRejected();Assert(feedback.Order(names,alt3).Contains(alt3),"A new explicit scan can retry rejected candidates");
+                bool missingRejected=false;try{feedback.Accept("missing.bat");}catch(InvalidOperationException){missingRejected=true;}Assert(missingRejected,"Missing strategy cannot be saved as user-confirmed");
+                feedback.Accept(alt9);store.Settings.Engine="1.10.2";
+                Assert(feedback.Working=="" && !feedback.IsRejected(alt3),"Confirmation is scoped to the engine version");
+                string running=null;int calls=0;
+                Func<CancellationToken,Task<CheckResult[]>> probes=token=>Task.FromResult(Enumerable.Range(0,ServiceChecks.Targets.Length).Select(x=>new CheckResult{State=1,Milliseconds=running==alt3?1:100}).ToArray());
+                var result=await StrategySelector.Run(new[]{alt3,alt9},(name,token)=>{running=name;return Task.FromResult(0);},()=>running=null,probes,CancellationToken.None,null,null,false,null,alt9);
+                Assert(result.Winner.Strategy==alt9,"Full scan keeps preferred ALT9 even when synthetic ALT3 latency is lower");
+                store.Settings.Engine="1.10.3";feedback.Reject(alt3);feedback.Reject(alt9);
+                result=await StrategySelector.Run(feedback.Order(names,alt9),(name,token)=>{calls++;running=name;return Task.FromResult(0);},()=>running=null,probes,CancellationToken.None,null,null,true);
+                Assert(result.Winner!=null && result.Winner.Strategy!=alt3 && result.Winner.Strategy!=alt9,"Continue finds another candidate without retrying rejected successful probes");
+                feedback.Order(names,alt9).ToList().ForEach(feedback.Reject);calls=0;
+                result=await StrategySelector.Run(feedback.Order(names,alt9),(name,token)=>{calls++;return Task.FromResult(0);},()=>running=null,probes,CancellationToken.None,null,null,true);
+                Assert(result.Winner==null && calls==0 && running==null,"Exhausted rejected candidates leave bypass stopped");
+                string error="windivert: error opening filter: The system cannot find the path specified.";
+                Assert(EngineDriverException.IsFailure(error) && !EngineDriverException.IsFailure("windivert initialized. capture is started.") && !EngineDriverException.IsFailure("windivert: error opening filter: The parameter is incorrect."),"Driver load failure is distinct from readiness and invalid strategy filter");
+                bool failed=false;calls=0;
+                try{await StrategySelector.Run(new[]{alt3,alt9},async (name,token)=>{calls++;await EngineRunner.WaitForReady(()=>false,()=>false,token,100,()=>error);},()=>running=null,probes,CancellationToken.None,null,null,true);}catch(EngineDriverException){failed=true;}
+                Assert(failed && calls==1 && running==null,"WinDivert failure aborts scan before any network probe or second strategy");
+                Assert(UserProblems.Message(new EngineDriverException(error)).Contains("WinDivert"),"Driver error displays a specific user explanation");
+                string snapshot=Path.Combine(folder,"runtime-"+new string('a',32));Copy(official,snapshot);
+                string driver=Path.Combine(snapshot,"bin","WinDivert64.sys"),registered=@"\??\"+driver;
+                string outside=Path.Combine(folder,"outside","WinDivert64.sys");
+                Assert(EngineHost.OwnedDriver(folder,registered)==driver && EngineHost.OwnedDriver(folder,outside)==null && EngineHost.OwnedDriver(folder,Path.Combine(folder,"runtime-invalid","bin","WinDivert64.sys"))==null,"Recovery allows only exact own runtime driver paths");
+                var inputs=EngineHost.ReadInputs(official);
+                EngineHost.CleanupSnapshot(snapshot,new[]{registered,outside});
+                Assert(File.Exists(driver) && !File.Exists(Path.Combine(snapshot,"bin","winws.exe")) && !Directory.Exists(Path.Combine(snapshot,"lists")),"Exit preserves only registered own driver, deletes executable and user lists");
+                File.Delete(driver);
+                var restored=EngineHost.RestoreDriverFiles(folder,inputs,new[]{registered,outside});
+                Assert(restored.SequenceEqual(new[]{driver}) && Trust.Hash(driver)==Trust.Hash(Path.Combine(official,"bin","WinDivert64.sys")) && !File.Exists(outside),"Missing registered own driver restored byte-for-byte from verified original core; external path untouched");
+                Assert(EngineHost.RestoreDriverFiles(folder,inputs,new[]{registered}).Length==0,"Existing driver is neither replaced nor overwritten");
+                EngineHost.CleanupSnapshot(snapshot,new string[0]);
+                Assert(!Directory.Exists(snapshot),"Unregistered runtime is removed completely");
+            }finally{RemoveFixture(folder);}
         }
         static async Task SelectionTests() {
             string running=null; int checks=0; var started=new System.Collections.Generic.List<string>();
