@@ -13,7 +13,7 @@ using System.Web.Script.Serialization;
 
 namespace ZapretDesktop {
     public sealed class Release {
-        public string Version, Url, Digest, Notes;
+        public string Version, Url, Digest, Notes, Proof;
         public long Size;
     }
     public sealed class Updater : IDisposable {
@@ -41,6 +41,7 @@ namespace ZapretDesktop {
                 if (!Regex.IsMatch(release.Digest ?? "", @"^sha256:[a-fA-F0-9]{64}$"))
                     throw new InvalidDataException("Для релиза нет SHA-256. Автоустановка отключена; откройте страницу релизов.");
                 if (release.Size < 1 || release.Size > 64 * 1024 * 1024) throw new InvalidDataException("Неожиданный размер архива.");
+                Trust.Archive(release.Version,release.Digest);
                 return release;
             }
             throw new InvalidDataException("В релизе не найден официальный ZIP-архив.");
@@ -89,6 +90,7 @@ namespace ZapretDesktop {
                 return BitConverter.ToString(sha.ComputeHash(file)).Replace("-", "").ToLowerInvariant();
         }
         public async Task Install(Release release, Action<string> progress) {
+            Trust.Archive(release.Version,release.Digest);
             var staging = Path.Combine(store.Root, "data", "staging-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(staging);
             try {
@@ -110,9 +112,9 @@ namespace ZapretDesktop {
                 progress("Проверка файлов и сохранение ваших настроек…");
                 var extracted = Path.Combine(staging, "unpacked");
                 await Task.Run(() => Extract(zip, extracted));
-                var engine = FindEngine(extracted); Strategy.ValidateEngine(engine);
+                var engine = FindEngine(extracted); Trust.VerifyEngine(engine);Strategy.ValidateEngine(engine);
                 File.WriteAllText(Path.Combine(engine, ".upstream-ipset.sha256"), Hash(Path.Combine(engine, "lists", "ipset-all.txt")));
-                Preserve(store.Current, engine); Strategy.ValidateEngine(engine);
+                Preserve(store.Current, engine);Trust.VerifyEngine(engine); Strategy.ValidateEngine(engine);
                 var versionFolder = release.Version + "-" + Guid.NewGuid().ToString("N").Substring(0, 8);
                 Directory.Move(engine, store.EnginePath(versionFolder));
                 var old = store.Settings.Engine; var previous = store.Settings.PreviousEngine;
@@ -125,13 +127,14 @@ namespace ZapretDesktop {
         public void Rollback() {
             var previous = store.Settings.PreviousEngine;
             if (String.IsNullOrEmpty(previous)) throw new InvalidOperationException("Нет предыдущей версии.");
+            Trust.VerifyEngine(store.EnginePath(previous));
             Strategy.ValidateEngine(store.EnginePath(previous));
             var current = store.Settings.Engine;
             // Stage the rollback so a failed copy cannot damage the saved previous engine.
             var restored = "rollback-" + Guid.NewGuid().ToString("N");
             var destination = store.EnginePath(restored);
             CopyTree(store.EnginePath(previous), destination);
-            Preserve(store.Current, destination); Strategy.ValidateEngine(destination);
+            Preserve(store.Current, destination);Trust.VerifyEngine(destination); Strategy.ValidateEngine(destination);
             store.Settings.Engine = restored; store.Settings.PreviousEngine = current;
             try { store.Save(); } catch { store.Settings.Engine = current; store.Settings.PreviousEngine = previous; throw; }
         }

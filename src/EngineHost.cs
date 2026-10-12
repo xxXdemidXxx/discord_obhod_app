@@ -1,0 +1,149 @@
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.IO.Pipes;
+using System.Linq;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Security.AccessControl;
+using System.Security.Principal;
+using System.Text;
+using System.Threading;
+using System.Web.Script.Serialization;
+
+namespace ZapretDesktop {
+    internal static class HostWire {
+        public const int Limit=65536;
+        public static Dictionary<string,object> Read(Stream stream) {
+            var header=new byte[4];Exact(stream,header);int length=BitConverter.ToInt32(header,0);
+            if(length<2 || length>Limit)throw new InvalidDataException("Недопустимый размер команды.");
+            var data=new byte[length];Exact(stream,data);
+            return new JavaScriptSerializer().Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(data));
+        }
+        static void Exact(Stream stream,byte[] data){int offset=0,count;while(offset<data.Length){count=stream.Read(data,offset,data.Length-offset);if(count==0)throw new EndOfStreamException();offset+=count;}}
+        public static void Write(Stream stream,object message) {
+            byte[] data=Encoding.UTF8.GetBytes(new JavaScriptSerializer().Serialize(message));
+            if(data.Length>Limit)throw new InvalidDataException("Сообщение слишком длинное.");
+            lock(stream){byte[] header=BitConverter.GetBytes(data.Length);stream.Write(header,0,4);stream.Write(data,0,data.Length);stream.Flush();}
+        }
+        [DllImport("kernel32.dll",SetLastError=true)] public static extern bool GetNamedPipeServerProcessId(IntPtr handle,out uint pid);
+        [DllImport("kernel32.dll",SetLastError=true)] public static extern bool GetNamedPipeClientProcessId(IntPtr handle,out uint pid);
+        [DllImport("kernel32.dll",SetLastError=true)] static extern IntPtr OpenProcess(uint access,bool inherit,int pid);
+        [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool QueryFullProcessImageName(IntPtr process,uint flags,StringBuilder path,ref int length);
+        [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+        [DllImport("advapi32.dll",SetLastError=true)] static extern bool OpenProcessToken(IntPtr process,uint access,out IntPtr token);
+        [DllImport("advapi32.dll",SetLastError=true)] static extern bool DuplicateToken(IntPtr token,int level,out IntPtr copy);
+        public static void AsCaller(int pid,Action read) {
+            IntPtr process=OpenProcess(0x1000,false,pid),token=IntPtr.Zero,copy=IntPtr.Zero;
+            try {
+                if(process==IntPtr.Zero || !OpenProcessToken(process,10,out token) || !DuplicateToken(token,2,out copy))throw new IOException("Не удалось проверить права клиента.");
+                using(WindowsIdentity.Impersonate(copy))read();
+            }finally{if(copy!=IntPtr.Zero)CloseHandle(copy);if(token!=IntPtr.Zero)CloseHandle(token);if(process!=IntPtr.Zero)CloseHandle(process);}
+        }
+        public static string Image(int pid) {
+            IntPtr handle=OpenProcess(0x1000,false,pid);if(handle==IntPtr.Zero)throw new IOException("Не удалось проверить процесс.");
+            try{var value=new StringBuilder(32768);int length=value.Capacity;if(!QueryFullProcessImageName(handle,0,value,ref length))throw new IOException("Не удалось прочитать путь процесса.");return value.ToString();}finally{CloseHandle(handle);}
+        }
+        public static string ProtectedRoot {get{return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),"ByPass");}}
+        public static void ProtectDirectory(string path) {
+            Trust.NoLinks(path);Directory.CreateDirectory(path);
+            var acl=new DirectorySecurity();acl.SetAccessRuleProtection(true,false);
+            var admins=new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid,null);
+            acl.SetOwner(admins);
+            foreach(var sid in new[]{admins,new SecurityIdentifier(WellKnownSidType.LocalSystemSid,null)})
+                acl.AddAccessRule(new FileSystemAccessRule(sid,FileSystemRights.FullControl,InheritanceFlags.ContainerInherit|InheritanceFlags.ObjectInherit,PropagationFlags.None,AccessControlType.Allow));
+            acl.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid,null),FileSystemRights.ReadAndExecute,InheritanceFlags.ContainerInherit|InheritanceFlags.ObjectInherit,PropagationFlags.None,AccessControlType.Allow));
+            Directory.SetAccessControl(path,acl);
+        }
+        public static void ProtectFile(string path) {
+            Trust.NoLinks(path);var acl=new FileSecurity();acl.SetAccessRuleProtection(true,false);
+            var admins=new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid,null);acl.SetOwner(admins);
+            foreach(var sid in new[]{admins,new SecurityIdentifier(WellKnownSidType.LocalSystemSid,null)})acl.AddAccessRule(new FileSystemAccessRule(sid,FileSystemRights.FullControl,AccessControlType.Allow));
+            acl.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid,null),FileSystemRights.ReadAndExecute,AccessControlType.Allow));File.SetAccessControl(path,acl);
+        }
+    }
+    // This entry point is compiled into a separate executable with no HTTP client or GUI.
+    internal static class EngineHost {
+        [STAThread] static int Main(string[] args) {
+            try {
+                if(args.Length!=3 || (args[0]!="--bootstrap" && args[0]!="--serve"))return 1;
+                int parent=Int32.Parse(args[1]);string pipeName=args[2];
+                if(!System.Text.RegularExpressions.Regex.IsMatch(pipeName,@"^ByPass-[a-f0-9]{32}$"))return 1;
+                if(!new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator))return 1;
+                if(args[0]=="--bootstrap") {
+                    string image=Assembly.GetExecutingAssembly().Location;
+                    using(var input=new FileStream(image,FileMode.Open,FileAccess.Read,FileShare.Read)) {
+                        byte[] data=new byte[input.Length];int offset=0,count;while(offset<data.Length && (count=input.Read(data,offset,data.Length-offset))>0)offset+=count;
+                        if(offset!=data.Length)throw new IOException();
+                        string hash;using(var sha=System.Security.Cryptography.SHA256.Create())hash=Trust.Hex(sha.ComputeHash(data));
+                        HostWire.ProtectDirectory(HostWire.ProtectedRoot);
+                        string folder=Path.Combine(HostWire.ProtectedRoot,"host-"+hash);HostWire.ProtectDirectory(folder);
+                        string target=Path.Combine(folder,"ByPass.EngineHost.exe");Trust.NoLinks(target);
+                        if(File.Exists(target) && Trust.Hash(target)!=hash)throw new InvalidDataException("Повреждён защищённый компонент.");
+                        if(!File.Exists(target))using(var output=new FileStream(target,FileMode.CreateNew,FileAccess.Write,FileShare.None))output.Write(data,0,data.Length);
+                        HostWire.ProtectFile(target);
+                        Process.Start(new ProcessStartInfo(target,"--serve "+parent+" "+pipeName){UseShellExecute=false,CreateNoWindow=true,WorkingDirectory=folder});
+                    }
+                    return 0;
+                }
+                Serve(parent,pipeName);return 0;
+            }catch{return 1;}
+        }
+        static void Serve(int parent,string name) {
+            using(var gui=Process.GetProcessById(parent))using(var pipe=new NamedPipeClientStream(".",name,PipeDirection.InOut,PipeOptions.None,TokenImpersonationLevel.Impersonation))using(var runner=new DirectEngineRunner()) {
+                pipe.Connect(30000);uint server;
+                if(!HostWire.GetNamedPipeServerProcessId(pipe.SafePipeHandle.DangerousGetHandle(),out server) || server!=parent)throw new InvalidDataException("Неизвестный клиент управления.");
+                string installation=Path.GetDirectoryName(HostWire.Image(parent));Trust.NoLinks(installation);
+                string snapshot=Path.Combine(HostWire.ProtectedRoot,"runtime-"+Guid.NewGuid().ToString("N"));HostWire.ProtectDirectory(snapshot);
+                bool done=false;
+                runner.Log+=line=>{try{HostWire.Write(pipe,new {type="log",text=line.Length>8192?line.Substring(0,8192):line});}catch{}};
+                using(var monitor=new Timer(_=>{try{if(gui.HasExited)pipe.Dispose();}catch{}},null,500,500)) {
+                    try {
+                        HostWire.Write(pipe,new{type="hello"});
+                        while(!done) {
+                            var command=HostWire.Read(pipe);string action=(string)command["action"];
+                            try {
+                                switch(action) {
+                                    case "start":
+                                        runner.Stop();
+                                        string version=(string)command["engine"],strategy=(string)command["strategy"];
+                                        if(!System.Text.RegularExpressions.Regex.IsMatch(version,@"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$") || version.Contains(".."))throw new InvalidDataException("Некорректная версия.");
+                                        string source=Path.Combine(installation,"data","engines",version);
+                                        Dictionary<string,byte[]> inputs=null;
+                                        // Read with the caller's token, so the administrator cannot be used to read privileged files.
+                                        HostWire.AsCaller(parent,()=>{inputs=ReadInputs(source);});
+                                        foreach(var path in Trust.Files(snapshot).ToArray())File.Delete(path);
+                                        foreach(var item in inputs){string path=Path.Combine(snapshot,item.Key);Directory.CreateDirectory(Path.GetDirectoryName(path));File.WriteAllBytes(path,item.Value);}
+                                        Trust.VerifyEngine(snapshot);runner.Start(snapshot,strategy);break;
+                                    case "stop":runner.Stop();break;
+                                    case "status":break;
+                                    case "shutdown":runner.Stop();done=true;break;
+                                    default:throw new InvalidDataException("Неизвестная команда.");
+                                }
+                                HostWire.Write(pipe,new{type="reply",running=runner.Running,error=""});
+                            }catch(Exception ex){HostWire.Write(pipe,new{type="reply",running=runner.Running,error=ex.Message});}
+                        }
+                    }finally{runner.Stop();try{Directory.Delete(snapshot,true);}catch{}}
+                }
+            }
+        }
+        static Dictionary<string,byte[]> ReadInputs(string source) {
+            var entry=Trust.VerifyEngine(source);
+            var required=new HashSet<string>(((ArrayList)entry["files"]).Cast<Dictionary<string,object>>().Select(x=>(string)x["path"]),StringComparer.OrdinalIgnoreCase);
+            var result=new Dictionary<string,byte[]>(StringComparer.OrdinalIgnoreCase);long total=0;
+            foreach(string path in Trust.Files(source)) {
+                string relative=path.Substring(Path.GetFullPath(source).TrimEnd('\\').Length+1).Replace('\\','/');
+                if(!required.Contains(relative) && !Trust.Mutable(relative))continue;
+                using(var file=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.Read)) {
+                    if(file.Length>64*1024*1024 || (total+=file.Length)>200*1024*1024)throw new InvalidDataException("Слишком большие файлы ядра.");
+                    var bytes=new byte[file.Length];int offset=0,count;
+                    while(offset<bytes.Length && (count=file.Read(bytes,offset,bytes.Length-offset))>0)offset+=count;
+                    if(offset!=bytes.Length)throw new IOException("Неполное чтение ядра.");result.Add(relative,bytes);
+                }
+            }
+            return result;
+        }
+    }
+}

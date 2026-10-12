@@ -12,6 +12,79 @@ using System.Windows.Forms;
 namespace ZapretDesktop {
     static class Tests {
         static int count;
+        static string Sign(string payload) {
+            using(var key=new System.Security.Cryptography.RSACryptoServiceProvider()) {
+                key.PersistKeyInCsp=false;key.FromXmlString(File.ReadAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"fixture-signing","key.private.xml")));
+                byte[] bytes=System.Text.Encoding.UTF8.GetBytes(payload);
+                return new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(new{signed_payload=Convert.ToBase64String(bytes),signature=Convert.ToBase64String(key.SignData(bytes,System.Security.Cryptography.CryptoConfig.MapNameToOID("SHA256")))});
+            }
+        }
+        static string Feed(string version){return Sign(RawFeed(version));}
+        static Release ParseFixture(string json) {
+            var serializer=new System.Web.Script.Serialization.JavaScriptSerializer();var data=serializer.Deserialize<System.Collections.Generic.Dictionary<string,object>>(json);
+            data["schema"]=1;data["shell_files"]=new{exe=new string('a',64),config=new string('a',64)};
+            return ShellUpdates.Parse(Sign(serializer.Serialize(data)));
+        }
+        static string Proof(string version,string exe,string config,string digest,long size) {
+            return Sign(new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(new{schema=1,tag_name="v"+version,draft=false,prerelease=false,shell_files=new{exe=Trust.Hash(exe),config=Trust.Hash(config)},assets=new[]{new{name="Obhod-"+version+"-win-x64.zip",browser_download_url="https://github.com/"+ShellUpdates.Repository+"/releases/download/v"+version+"/Obhod-"+version+"-win-x64.zip",digest=digest,size=size}}}));
+        }
+        static string BuildProof(string exe,string config) {
+            return Sign(new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(new{schema=1,kind="ByPass-build",owner=OwnerIdentity.Owner,version=ShellUpdates.Current,shell_files=new{exe=Trust.Hash(exe),config=Trust.Hash(config)}}));
+        }
+        static void WriteProof(string source) {
+            File.WriteAllText(Path.Combine(Path.GetDirectoryName(source),"release-proof.json"),Proof(ShellUpdates.Current,source,source+".config","sha256:"+new string('a',64),123));
+            File.WriteAllText(Path.Combine(Path.GetDirectoryName(source),OwnerIdentity.ProofName),BuildProof(source,source+".config"));
+        }
+        static void SecurityTests(string root,string official) {
+            var valid=Feed("99.0.0");Assert(ShellUpdates.Parse(valid).Version=="99.0.0","Offline signed release accepted");
+            Reject(()=>ShellUpdates.Parse(RawFeed("99.0.0")),"Unsigned release rejected");
+            var serializer=new System.Web.Script.Serialization.JavaScriptSerializer();var envelope=serializer.Deserialize<System.Collections.Generic.Dictionary<string,object>>(valid);
+            byte[] payload=Convert.FromBase64String((string)envelope["signed_payload"]);payload[0]^=1;envelope["signed_payload"]=Convert.ToBase64String(payload);
+            Reject(()=>ShellUpdates.Parse(serializer.Serialize(envelope)),"Changed signed payload rejected");
+            envelope=serializer.Deserialize<System.Collections.Generic.Dictionary<string,object>>(valid);envelope["tag_name"]="v900.0.0";
+            Assert(ShellUpdates.Parse(serializer.Serialize(envelope)).Version=="99.0.0","Untrusted legacy outer fields cannot replace signed release data");
+            using(var wrong=new System.Security.Cryptography.RSACryptoServiceProvider(2048)) {
+                wrong.PersistKeyInCsp=false;payload=System.Text.Encoding.UTF8.GetBytes(RawFeed("99.0.0"));
+                string forged=serializer.Serialize(new{signed_payload=Convert.ToBase64String(payload),signature=Convert.ToBase64String(wrong.SignData(payload,System.Security.Cryptography.CryptoConfig.MapNameToOID("SHA256")))});
+                Reject(()=>ShellUpdates.Parse(forged),"Release signed by another key rejected");
+            }
+            Assert((string)Trust.VerifyEngine(official)["version"]=="1.10.3","Approved core catalogue matches upstream files");
+            Reject(()=>Trust.Archive("1.10.3","sha256:"+new string('a',64)),"Compromised upstream digest rejected by offline catalogue");
+            Reject(()=>Trust.Engine("99.0.0"),"Unreviewed future core rejected");
+            var fixture=Path.Combine(root,"tests","fixture-trust-"+Guid.NewGuid().ToString("N"));Copy(official,fixture);
+            try {
+                File.WriteAllText(Path.Combine(fixture,"lists","list-general-user.txt"),"my.example\n");
+                Assert(Trust.VerifyEngine(fixture)!=null,"User list remains editable without changing core trust");
+                string binary=Path.Combine(fixture,"bin","winws.exe");File.AppendAllText(binary,"tamper");
+                Reject(()=>Trust.VerifyEngine(fixture),"Modified native executable rejected before elevation");
+                File.Copy(Path.Combine(official,"bin","winws.exe"),binary,true);
+                File.AppendAllText(Path.Combine(fixture,"general.bat"),"\nmalicious");
+                Reject(()=>Trust.VerifyEngine(fixture),"Modified strategy rejected before elevated argument parsing");
+                File.Copy(Path.Combine(official,"general.bat"),Path.Combine(fixture,"general.bat"),true);
+                File.WriteAllText(Path.Combine(fixture,"bin","injected.dll"),"fake");
+                Reject(()=>Trust.VerifyEngine(fixture),"Extra DLL rejected even when approved hashes match");
+            }finally{Directory.Delete(fixture,true);}
+            using(var wire=new MemoryStream()) {
+                HostWire.Write(wire,new{action="stop"});wire.Position=0;Assert((string)HostWire.Read(wire)["action"]=="stop","Framed local command round trip");
+            }
+            using(var wire=new MemoryStream(BitConverter.GetBytes(HostWire.Limit+1)))Reject(()=>HostWire.Read(wire),"Oversized IPC command rejected before allocation");
+            using(var wire=new MemoryStream())Reject(()=>HostWire.Write(wire,new{text=new string('x',HostWire.Limit)}),"Oversized IPC reply rejected");
+            string ownerConfig=Path.Combine(root,"tests","fixture-signing","test.config");File.WriteAllText(ownerConfig,"<configuration/>");
+            string receipt=BuildProof(Application.ExecutablePath,ownerConfig);OwnerIdentity.Verify(receipt,Application.ExecutablePath,ownerConfig,ShellUpdates.Current);Assert(true,"Author identity receipt verifies exact executable and config");
+            Reject(()=>OwnerIdentity.Verify(receipt,Application.ExecutablePath,ownerConfig,"99.0.0"),"Author receipt cannot be reused for another version");
+            File.WriteAllText(ownerConfig,"changed");Reject(()=>OwnerIdentity.Verify(receipt,Application.ExecutablePath,ownerConfig,ShellUpdates.Current),"Author mark rejects modified build configuration");
+            string name="ByPass-"+Guid.NewGuid().ToString("N");
+            using(var server=new System.IO.Pipes.NamedPipeServerStream(name,System.IO.Pipes.PipeDirection.InOut,1,System.IO.Pipes.PipeTransmissionMode.Byte,System.IO.Pipes.PipeOptions.Asynchronous))
+            using(var client=new System.IO.Pipes.NamedPipeClientStream(".",name,System.IO.Pipes.PipeDirection.InOut)) {
+                var pending=server.BeginWaitForConnection(null,null);client.Connect(2000);server.EndWaitForConnection(pending);
+                uint peer;Assert(HostWire.GetNamedPipeClientProcessId(server.SafePipeHandle.DangerousGetHandle(),out peer) && peer==Process.GetCurrentProcess().Id,"Local transport identifies actual helper process");
+                Assert(HostWire.GetNamedPipeServerProcessId(client.SafePipeHandle.DangerousGetHandle(),out peer) && peer==Process.GetCurrentProcess().Id,"Local transport identifies actual GUI process");
+                var send=Task.Run(()=>HostWire.Write(client,new{action="status"}));Assert((string)HostWire.Read(server)["action"]=="status","Real local pipe delivers bounded commands");Assert(send.Wait(2000),"Pipe writer completes with concurrent receiver");
+            }
+            Assert(String.Equals(HostWire.Image(Process.GetCurrentProcess().Id),Application.ExecutablePath,StringComparison.OrdinalIgnoreCase),"Process path can be verified with limited query access");
+            bool readAsCaller=false;HostWire.AsCaller(Process.GetCurrentProcess().Id,()=>{readAsCaller=File.Exists(Application.ExecutablePath);});
+            Assert(readAsCaller,"Helper source reads can use caller token");
+        }
         [DllImport("shell32.dll", SetLastError=true)] static extern IntPtr CommandLineToArgvW([MarshalAs(UnmanagedType.LPWStr)] string command, out int argc);
         [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
         static void Assert(bool condition, string message) { if (!condition) throw new Exception(message); count++; }
@@ -27,7 +100,7 @@ namespace ZapretDesktop {
                 var root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".."));
                 var local = Path.GetFullPath(Path.Combine(root, "..", "zapret-discord-youtube-1.10.2"));
                 var official = Path.Combine(root, "downloads", "official-1.10.3", "zapret-discord-youtube-1.10.3");
-                if(!Directory.Exists(local))local=official; SelectionTests().GetAwaiter().GetResult(); DomainTests(root); UpdateFeedTests().GetAwaiter().GetResult(); AppUpdateSessionTests(root).GetAwaiter().GetResult(); StageTests(root).GetAwaiter().GetResult(); ShellReplacementTest(root); ShellRollbackTest(root); ShellHandshakeTest(root);
+                local=official;SecurityTests(root,official); SelectionTests().GetAwaiter().GetResult(); DomainTests(root); UpdateFeedTests().GetAwaiter().GetResult(); AppUpdateSessionTests(root).GetAwaiter().GetResult(); StageTests(root).GetAwaiter().GetResult(); ShellReplacementTest(root); ShellRollbackTest(root); ShellHandshakeTest(root);
                 foreach (var engine in new[] {local, official}.Distinct()) {
                     Strategy.ValidateEngine(engine);
                     var profiles = Directory.GetFiles(engine, "general*.bat"); Assert(profiles.Length == 22, "22 upstream profiles expected");
@@ -49,7 +122,7 @@ namespace ZapretDesktop {
                 Assert(Strategy.NeedsTcpTimestamps(Strategy.Arguments(official, "general (ALT).bat")), "Timestamp strategies request upstream prerequisite");
                 var temp = Path.Combine(root, "tests", "fixture-" + Guid.NewGuid().ToString("N"));
                 try {
-                    var store = new Store(temp); Copy(local, store.Current); var old = store.Current;
+                    var store = new Store(temp);store.Settings.Engine="1.10.3-local"; Copy(local, store.Current); var old = store.Current;
                     Reject(() => store.EnginePath("../outside"), "Version path traversal rejected");
                     var game = Path.Combine(old, "utils", "game_filter.enabled");
                     File.WriteAllText(game, "mode=tcp\r\ntcp=1024-1934,1936-65535\r\nudp=1024-65535\r\n");
@@ -73,7 +146,7 @@ namespace ZapretDesktop {
                     Assert(!File.Exists(Path.Combine(temp, "outside.txt")), "No file escapes staging");
                     // Exercise process ownership and hidden startup using a harmless stub, never the real driver.
                     var fake = store.EnginePath("test-process"); Copy(local, fake); File.Copy(Application.ExecutablePath, Path.Combine(fake, "bin", "winws.exe"), true);
-                    using (var runner = new EngineRunner()) {
+                    using (var runner = new DirectEngineRunner(true)) {
                         if (!runner.Conflict) { runner.Start(fake, "general.bat"); Assert(runner.Running, "Owned process started"); runner.Stop(); Assert(!runner.Running, "Owned process stopped"); }
                         else {
                             var before = Process.GetProcessesByName("winws").Select(p => p.Id).OrderBy(x => x).ToArray();
@@ -128,14 +201,14 @@ namespace ZapretDesktop {
             public Func<string,CancellationToken,Task<System.Net.Http.HttpResponseMessage>> AsyncReply;
             protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(System.Net.Http.HttpRequestMessage request,CancellationToken token){Calls++;Urls.Add(request.RequestUri.AbsoluteUri);return AsyncReply==null?Task.FromResult(Reply(request.RequestUri.AbsoluteUri)):AsyncReply(request.RequestUri.AbsoluteUri,token);}
         }
-        static string Feed(string version){return new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(new{tag_name="v"+version,draft=false,prerelease=false,assets=new[]{new{name="Obhod-"+version+"-win-x64.zip",browser_download_url="https://github.com/"+ShellUpdates.Repository+"/releases/download/v"+version+"/Obhod-"+version+"-win-x64.zip",digest="sha256:"+new string('a',64),size=123}}});}
+        static string RawFeed(string version){return new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(new{schema=1,shell_files=new{exe=new string('a',64),config=new string('a',64)},tag_name="v"+version,draft=false,prerelease=false,assets=new[]{new{name="Obhod-"+version+"-win-x64.zip",browser_download_url="https://github.com/"+ShellUpdates.Repository+"/releases/download/v"+version+"/Obhod-"+version+"-win-x64.zip",digest="sha256:"+new string('a',64),size=123}}});}
         static System.Net.Http.HttpResponseMessage Response(int status,string text){return new System.Net.Http.HttpResponseMessage((System.Net.HttpStatusCode)status){Content=new System.Net.Http.StringContent(text)};}
         static async Task UpdateFeedTests(){
             var http=new MockHttp{Reply=url=>Response(200,Feed("99.0.0"))};
             using(var updates=new ShellUpdates(http)){var release=await updates.Check();Assert(release.Version=="99.0.0" && http.Calls==1 && http.Urls[0].EndsWith("/releases/latest/download/update.json"),"New shell release discovered without public API calls");}
             http=new MockHttp{Reply=url=>Response(url.Contains("/download/")?404:200,Feed(ShellUpdates.Current))};
-            using(var updates=new ShellUpdates(http)){Assert(await updates.Check()==null && http.Calls==2 && http.Urls[1].StartsWith("https://api.github.com/"),"Legacy releases without a feed fall back to API once");}
-            http=new MockHttp{Reply=url=>Response(200,Feed("99.0.0").Replace("sha256:","sha512:"))};
+            using(var updates=new ShellUpdates(http)){bool refused=false;try{await updates.Check();}catch(InvalidDataException){refused=true;}Assert(refused && http.Calls==1,"Missing signed feed never falls back to unsigned API metadata");}
+            http=new MockHttp{Reply=url=>Response(200,Sign(RawFeed("99.0.0").Replace("sha256:","sha512:")))};
             using(var updates=new ShellUpdates(http)){bool rejected=false;try{await updates.Check();}catch(InvalidDataException){rejected=true;}Assert(rejected,"Feed without a valid hash cannot install an update");}
             http=new MockHttp{Reply=url=>{var response=Response(403,"API rate limit exceeded");response.Headers.Add("X-RateLimit-Remaining","0");response.Headers.Add("X-RateLimit-Reset",((long)(DateTimeOffset.UtcNow.AddHours(1)-new DateTimeOffset(1970,1,1,0,0,0,TimeSpan.Zero)).TotalSeconds).ToString());return response;}};
             using(var client=new System.Net.Http.HttpClient(http)){for(int i=0;i<2;i++){bool friendly=false;try{await GitHubMetadata.Get(client,"https://api.github.com/repos/test-fixture/backoff/releases/latest");}catch(UpdateCheckException ex){friendly=ex.Message.Contains("Попробуйте позже") && !ex.Message.Contains("403");}Assert(friendly,"Rate limit gets a readable message");}Assert(http.Calls==1,"Repeated checks respect GitHub reset time and do not send another request");}
@@ -174,13 +247,16 @@ namespace ZapretDesktop {
             string folder=Path.Combine(root,"tests","fixture-stage-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(folder);
             string archive=Path.Combine(folder,"source.zip");
             try{
+                string configFixture=Path.Combine(folder,"config");File.WriteAllText(configFixture,"<configuration/>");
                 using(var zip=ZipFile.Open(archive,ZipArchiveMode.Create)){
                     zip.CreateEntryFromFile(Path.Combine(root,"tests","Obhod-probe.exe"),brand+"/"+brand+".exe");
                     using(var text=new StreamWriter(zip.CreateEntry(brand+"/"+brand+".exe.config").Open()))text.Write("<configuration/>");
+                    using(var text=new StreamWriter(zip.CreateEntry(brand+"/"+OwnerIdentity.ProofName).Open()))text.Write(BuildProof(Path.Combine(root,"tests","Obhod-probe.exe"),configFixture));
                     byte[] bytes=new byte[250000];new Random(42).NextBytes(bytes);using(var stream=zip.CreateEntry(brand+"/unused.bin").Open())stream.Write(bytes,0,bytes.Length);
                 }
                 byte[] content=File.ReadAllBytes(archive);
-                var release=new Release{Version=ShellUpdates.Current,Url="https://github.com/test/archive.zip",Size=content.Length,Digest="sha256:"+Updater.Hash(archive)};
+                var release=new Release{Version=ShellUpdates.Current,Url="https://github.com/"+ShellUpdates.Repository+"/releases/download/v"+ShellUpdates.Current+"/Obhod-"+ShellUpdates.Current+"-win-x64.zip",Size=content.Length,Digest="sha256:"+Updater.Hash(archive)};
+                release.Proof=Proof(release.Version,Path.Combine(root,"tests","Obhod-probe.exe"),configFixture,release.Digest,release.Size);
                 var http=new MockHttp{Reply=url=>new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK){Content=new System.Net.Http.ByteArrayContent(content)}};
                 using(var updater=new ShellUpdates(http)){
                     int previous=0,reports=0;
@@ -272,7 +348,7 @@ namespace ZapretDesktop {
             try{
                 string source=Path.Combine(stage,"Obhod.exe"),target=Path.Combine(folder,"Obhod.exe");
                 File.Copy(Path.Combine(root,"tests","Obhod-probe.exe"),source);File.WriteAllText(source+".config","<configuration/>");
-                File.WriteAllText(Path.Combine(stage,"verified.sha256"),Updater.Hash(source));File.WriteAllText(Path.Combine(stage,"config.sha256"),Updater.Hash(source+".config"));File.WriteAllText(Path.Combine(stage,"version.txt"),ShellUpdates.Current);
+                WriteProof(source);
                 File.Copy(source,target);using(var stream=new FileStream(target,FileMode.Append))stream.WriteByte(42);string oldHash=Updater.Hash(target);
                 File.WriteAllText(target+".config","<configuration/>");Directory.CreateDirectory(target+".config.new");
                 using(var helper=Process.Start(new ProcessStartInfo(source,"--apply-update 2147483647 "+Strategy.Quote(target)+" --connect"){UseShellExecute=false,CreateNoWindow=true})){bool exited=helper.WaitForExit(10000);if(!exited)helper.Kill();Assert(exited,"Failed helper exits without opening a warning dialog");}
@@ -328,8 +404,7 @@ namespace ZapretDesktop {
                 var source=Path.Combine(stage,"ByPass.exe");var target=Path.Combine(folder,brand+".exe");
                 File.Copy(Path.Combine(root,"tests","Obhod-probe.exe"),source);
                 File.WriteAllText(source+".config","<?xml version=\"1.0\"?><configuration><startup><supportedRuntime version=\"v4.0\"/></startup></configuration>");
-                File.WriteAllText(Path.Combine(stage,"verified.sha256"),Updater.Hash(source));File.WriteAllText(Path.Combine(stage,"config.sha256"),Updater.Hash(source+".config"));
-                File.WriteAllText(Path.Combine(stage,"version.txt"),ShellUpdates.Current);
+                WriteProof(source);
                 File.WriteAllText(target,"previous executable");File.WriteAllText(target+".config","previous config");
                 string settings=Path.Combine(folder,"data","settings.json");File.WriteAllText(settings,"preserved settings");
                 using(var helper=Process.Start(new ProcessStartInfo(source,"--apply-update 2147483647 "+Strategy.Quote(target)+" --connect"){UseShellExecute=false,CreateNoWindow=true})) {
@@ -349,7 +424,7 @@ namespace ZapretDesktop {
             try{
                 string source=Path.Combine(stage,"Obhod.exe"),target=Path.Combine(folder,"Obhod.exe");
                 File.Copy(Path.Combine(root,"tests","Obhod-probe.exe"),source);File.WriteAllText(source+".config","<configuration/>");
-                File.WriteAllText(Path.Combine(stage,"verified.sha256"),Updater.Hash(source));File.WriteAllText(Path.Combine(stage,"config.sha256"),Updater.Hash(source+".config"));File.WriteAllText(Path.Combine(stage,"version.txt"),ShellUpdates.Current);
+                WriteProof(source);
                 File.WriteAllText(target,"still running");
                 using(var helper=Process.Start(new ProcessStartInfo(source,"--apply-update "+Process.GetCurrentProcess().Id+" "+Strategy.Quote(target)+" --ready"){UseShellExecute=false,CreateNoWindow=true})){
                     try{var watch=Stopwatch.StartNew();while(!File.Exists(Path.Combine(stage,"helper-ready.txt")) && watch.ElapsedMilliseconds<5000 && !helper.HasExited)Thread.Sleep(20);Assert(File.Exists(Path.Combine(stage,"helper-ready.txt")) && !helper.HasExited && File.ReadAllText(target)=="still running","Validated helper acknowledges readiness and waits before replacing the running application");}
@@ -407,15 +482,15 @@ namespace ZapretDesktop {
             Assert(selected.Winner.Strategy=="good" && confirmCalls==2,"Quick mode continues after failed confirmation");
             string next="99.0.0";
             string json="{\"tag_name\":\"v"+next+"\",\"draft\":false,\"prerelease\":false,\"assets\":[{\"name\":\"Obhod-"+next+"-win-x64.zip\",\"browser_download_url\":\"https://github.com/"+ShellUpdates.Repository+"/releases/download/v"+next+"/Obhod-"+next+"-win-x64.zip\",\"digest\":\"sha256:"+new string('a',64)+"\",\"size\":100}]}";
-            Assert(ShellUpdates.Parse(json).Version==next,"Stable newer shell release accepted");
+            Assert(ParseFixture(json).Version==next,"Stable newer shell release accepted");
             string stable=json.Replace("Obhod-"+next+"-win-x64.zip","ByPass-win-x64.zip");
-            Assert(ShellUpdates.Parse(stable).Version==next,"Permanent download filename accepted for shell updates");
-            Reject(()=>ShellUpdates.Parse(stable.Replace("/download/v"+next+"/","/download/v0.0.1/")),"Permanent filename must still belong to the declared release tag");
-            Reject(()=>ShellUpdates.Parse(stable.Replace("https://github.com/","https://example.com/")),"Foreign permanent download URL rejected");
-            Reject(()=>ShellUpdates.Parse(json.Replace("sha256:","sha512:")),"Missing or wrong digest prevents shell update");
-            Reject(()=>ShellUpdates.Parse(json.Replace("https://github.com/","https://example.com/")),"Foreign update URL rejected");
-            Assert(ShellUpdates.Parse(json.Replace("\"prerelease\":false","\"prerelease\":true"))==null,"Prerelease excluded from automatic updates");
-            Assert(ShellUpdates.Parse(json.Replace(next,ShellUpdates.Current))==null,"Current version does not update itself");
+            Assert(ParseFixture(stable).Version==next,"Permanent download filename accepted for shell updates");
+            Reject(()=>ParseFixture(stable.Replace("/download/v"+next+"/","/download/v0.0.1/")),"Permanent filename must still belong to the declared release tag");
+            Reject(()=>ParseFixture(stable.Replace("https://github.com/","https://example.com/")),"Foreign permanent download URL rejected");
+            Reject(()=>ParseFixture(json.Replace("sha256:","sha512:")),"Missing or wrong digest prevents shell update");
+            Reject(()=>ParseFixture(json.Replace("https://github.com/","https://example.com/")),"Foreign update URL rejected");
+            Assert(ParseFixture(json.Replace("\"prerelease\":false","\"prerelease\":true"))==null,"Prerelease excluded from automatic updates");
+            Assert(ParseFixture(json.Replace(next,ShellUpdates.Current))==null,"Current version does not update itself");
         }
 
         static DarkTabs FindTabs(Control root) {

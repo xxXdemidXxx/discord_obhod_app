@@ -1,3 +1,4 @@
+param([switch]$OwnerSignature)
 $ErrorActionPreference = 'Stop'
 & (Join-Path $PSScriptRoot 'fetch-engine.ps1')
 $version = ([version]([regex]::Match((Get-Content -LiteralPath "$PSScriptRoot\src\Version.cs" -Raw), 'Value = "([0-9.]+)"').Groups[1].Value)).ToString(3)
@@ -14,6 +15,14 @@ $appDir = Join-Path $stage 'Obhod'
 New-Item -ItemType Directory -Force -Path $appDir | Out-Null
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "dist\Obhod-$version.exe") -Destination (Join-Path $appDir 'Obhod.exe')
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "dist\Obhod-$version.exe.config") -Destination (Join-Path $appDir 'Obhod.exe.config')
+if($OwnerSignature) {
+    if(& git -C $PSScriptRoot status --porcelain){throw 'Owner signature requires a clean committed source tree'}
+    . "$PSScriptRoot\tools\signing.ps1"
+    $buildProof=@{schema=1;kind='ByPass-build';owner='xxXdemidXxx';version=$version;source_commit=(& git -C $PSScriptRoot rev-parse HEAD);shell_files=@{exe=(Get-FileHash -LiteralPath (Join-Path $appDir 'Obhod.exe') -Algorithm SHA256).Hash.ToLowerInvariant();config=(Get-FileHash -LiteralPath (Join-Path $appDir 'Obhod.exe.config') -Algorithm SHA256).Hash.ToLowerInvariant()}} | ConvertTo-Json -Depth 8 -Compress
+    $key=Get-ByPassSigningKey
+    try{[IO.File]::WriteAllText((Join-Path $appDir 'build-proof.json'),(Add-ByPassSignature -Json $buildProof -Key $key),[Text.UTF8Encoding]::new($false))}finally{$key.Dispose()}
+    Copy-Item -LiteralPath (Join-Path $appDir 'build-proof.json') -Destination (Join-Path $releaseDir 'build-proof.json') -Force
+}
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'LICENSE') -Destination $appDir
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'licenses') -Destination (Join-Path $appDir 'licenses') -Recurse
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'TESTING-GUIDE.txt') -Destination (Join-Path $appDir 'GUIDE.txt')
@@ -49,7 +58,16 @@ Write-Output "Download: $download"
 Write-Output "Compatible update archive: $zip"
 Write-Output "SHA-256: $hash"
 $metadata = @{
+    schema=1
+    source_commit=(& git -C $PSScriptRoot rev-parse HEAD)
+    source_dirty=([bool](& git -C $PSScriptRoot status --porcelain))
+    shell_files=@{exe=(Get-FileHash -LiteralPath (Join-Path $appDir 'Obhod.exe') -Algorithm SHA256).Hash.ToLowerInvariant();config=(Get-FileHash -LiteralPath (Join-Path $appDir 'Obhod.exe.config') -Algorithm SHA256).Hash.ToLowerInvariant()}
     tag_name="v$version";draft=$false;prerelease=$false
     assets=@(@{name="Obhod-$version-win-x64.zip";browser_download_url="https://github.com/xxXdemidXxx/discord_obhod_app/releases/download/v$version/Obhod-$version-win-x64.zip";size=(Get-Item -LiteralPath $zip).Length;digest="sha256:$hash"})
 } | ConvertTo-Json -Depth 5
-[IO.File]::WriteAllText((Join-Path $releaseDir 'update.json'),$metadata,(New-Object Text.UTF8Encoding($false)))
+[IO.File]::WriteAllText((Join-Path $releaseDir 'update-unsigned.json'),$metadata,(New-Object Text.UTF8Encoding($false)))
+# Do not leave an older signed manifest beside a newly built archive.
+if(Test-Path -LiteralPath (Join-Path $releaseDir 'update.json')){Remove-Item -LiteralPath (Join-Path $releaseDir 'update.json')}
+$resolvedStage=[IO.Path]::GetFullPath($stage)
+if(-not $resolvedStage.StartsWith([IO.Path]::GetFullPath($releaseDir)+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'Invalid package staging path'}
+Remove-Item -LiteralPath $resolvedStage -Recurse -Force

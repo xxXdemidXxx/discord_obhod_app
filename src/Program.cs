@@ -43,11 +43,12 @@ namespace ZapretDesktop {
         readonly AppUpdateSession appUpdates;
         readonly Func<string,string,bool> confirmUpdate;
         UpdateNotice updateNotice;
+        Label ownerMark;
         AppUpdateCard appUpdateCard; Button coreManual; CheckBox autoShell; bool updateOutcome;
         bool previouslyOn;
         CancellationTokenSource checkCancellation; bool testing, checkingUpdates;
         NotifyIcon tray; System.Windows.Forms.Timer timer;
-        Release release; bool busy, exiting, loading, elevation;
+        Release release; bool busy, exiting, loading;
         public MainForm(Store store, bool start, bool auto = false, bool restoreConnection = false, bool fullScan = false, ShellUpdates shellUpdates = null, Func<string,string,bool> updateConfirmation = null) {
             this.store = store; updater = new Updater(store);appUpdates=new AppUpdateSession(shellUpdates??new ShellUpdates());
             confirmUpdate=updateConfirmation??((title,message)=>MessageBox.Show(this,message,title,MessageBoxButtons.YesNo,MessageBoxIcon.Question,MessageBoxDefaultButton.Button2)==DialogResult.Yes);
@@ -60,6 +61,10 @@ namespace ZapretDesktop {
             timer.Tick += (s,e) => RefreshState();timer.Start();
             appUpdates.Changed+=AppUpdateChanged;
             LoadSettings();
+            RenderOwner(OwnerIdentity.Current(Application.ExecutablePath));
+#if !TESTING
+            Shown+=async(s,e)=>{bool verified=await OwnerIdentity.RestoreProof(Application.ExecutablePath);if(!IsDisposed)RenderOwner(verified);};
+#endif
             var outcome=ShellUpdates.TakeOutcome(store.Root);updateOutcome=outcome!=null;
             if(outcome!=null){if(outcome.Success && outcome.Version==ShellUpdates.Current)appUpdates.Complete();else {appUpdates.Fail("Обновление не установлено. Текущая версия сохранена.");Append("Установка обновления: "+outcome.Error);}tabs.SelectedIndex=2;}
             Shown += async (s,e) => {Append("ByPass "+ShellUpdates.Current+". Ядро "+Updater.Version(store.Current));if(auto)await AutoSelect(restoreConnection);else if(start)await ApplyStrategy();if(!IsDisposed && store.Settings.AutoAppUpdates && !updateOutcome)await CheckShell(true);if(!IsDisposed && store.Settings.CheckUpdates)await CheckUpdates(true);};
@@ -67,6 +72,10 @@ namespace ZapretDesktop {
         }
         Label Label(string text, float size, Color color, int x, int y, int width, int height) {
             return new Label { Text = text, Font = new Font("Segoe UI", size), ForeColor = color, Location = new Point(x,y), Size = new Size(width,height) };
+        }
+        void RenderOwner(bool verified) {
+            ownerMark.Text="ByPass "+ShellUpdates.Current+" · "+(verified?"Автор: "+OwnerIdentity.Owner+" · Подпись сборки подтверждена":"Подпись автора не подтверждена");
+            ownerMark.ForeColor=verified?Theme.Success:Theme.Muted;
         }
         Button Button(string text, Color color, int x, int y, int width, int height) {
             var b = new FlatAction { Text = text, BackColor = color, ForeColor = color == accent ? background : Color.White, FlatStyle = FlatStyle.Flat, Location = new Point(x,y), Size = new Size(width,height), Cursor = Cursors.Hand };
@@ -118,35 +127,28 @@ namespace ZapretDesktop {
             Append("Настройки GameFilter сохранены.");
         }
         async Task Toggle() {
-            if (busy || elevation || starting) return;
+            if (busy || starting) return;
             if(scanning){stopAfterScan=true;if(scanCancellation!=null)scanCancellation.Cancel();return;}
             try {
                 if(runner.Running){starting=true;InvalidateChecks("Обход выключен · запустите новую проверку");await StopChecks();runner.Stop();return;}
                 await ApplyStrategy();
             }catch(Exception ex){Error(ex);}finally{starting=false;if(!IsDisposed)RefreshState();}
         }
-        bool IsAdmin() {using(var identity=WindowsIdentity.GetCurrent())return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);}
-        void Elevate(string arguments) {
-            elevation=true;
-            try{Process.Start(new ProcessStartInfo(Application.ExecutablePath,arguments){UseShellExecute=true,Verb="runas"});Exit();}
-            finally{elevation=false;}
-        }
         async Task ApplyStrategy() {
-            if(busy || elevation || starting || scanning)return;
+            if(busy || starting || scanning)return;
             starting=true;RefreshState();
             try {
                 if (profiles.SelectedItem == null) throw new InvalidOperationException("Нет стратегий. Проверьте папку data/engines.");
                 if(runner.Conflict)throw new InvalidOperationException("Сначала завершите внешний winws через его исходное приложение.");
                 InvalidateChecks("Применяем стратегию…");await StopChecks();runner.Stop();
                 store.Settings.Strategy = profiles.SelectedItem.ToString(); store.Save();
-                if(!IsAdmin()){Elevate("--connect");return;}
                 await StartEngine(store.Settings.Strategy,CancellationToken.None);
                 starting=false;RefreshState();await RunChecks();
             }catch(Exception ex){if(!IsDisposed)Error(ex);}finally{starting=false;if(!IsDisposed)RefreshState();}
         }
         async Task StartEngine(string strategy,CancellationToken token) {
             token.ThrowIfCancellationRequested();await Task.Delay(150,token);
-            activeStrategy=strategy;runner.Start(store.Current,strategy);RefreshState();
+            activeStrategy=strategy;await Task.Run(()=>runner.Start(store.Current,strategy));RefreshState();
             await Task.Delay(650,token);
             if(!runner.Running)throw new IOException("Ядро завершилось после запуска. Подробности в журнале.");
         }
@@ -156,11 +158,8 @@ namespace ZapretDesktop {
             if(manualCheckTask!=null){try{await manualCheckTask;}catch(OperationCanceledException){}}
         }
         async Task AutoSelect(bool restoreConnection) {
-            if(scanning || busy || starting || elevation || dnsBusy)return;
+            if(scanning || busy || starting || dnsBusy)return;
             if(runner.Conflict){Error(new InvalidOperationException("Завершите внешний winws перед автоподбором."));return;}
-            if(!IsAdmin()) {
-                try{Elevate("--autoselect"+(runner.Running?" --restore-connect":"")+(dashboard.ScanMode.SelectedIndex==1?" --full-scan":""));}catch(Exception ex){Error(ex);}return;
-            }
             bool wasRunning=runner.Running || restoreConnection;
             string original=runner.Running?activeStrategy:store.Settings.Strategy;
             bool quick=dashboard.ScanMode.SelectedIndex==0;
@@ -263,7 +262,7 @@ namespace ZapretDesktop {
             check.Enabled = !busy && !scanning && !checkingUpdates; install.Enabled = !on && !external && !busy && !scanning && !starting && !checkingUpdates && !testing && !domainEditor.Dirty && release != null;
             rollback.Enabled = !on && !external && !busy && !scanning && !starting && !checkingUpdates && !testing && !domainEditor.Dirty && !String.IsNullOrEmpty(store.Settings.PreviousEngine);
             autoCheck.Enabled = !busy && !checkingUpdates; runChecks.Enabled = !busy && !starting && !scanning && !testing;
-            appUpdateCard.Action.Enabled = !appUpdates.Working && !busy && !starting && !scanning && !dnsBusy && (appUpdates.Release==null || !domainEditor.Dirty) && !elevation;
+            appUpdateCard.Action.Enabled = !appUpdates.Working && !busy && !starting && !scanning && !dnsBusy && (appUpdates.Release==null || !domainEditor.Dirty);
             appUpdateCard.Render(appUpdates,appUpdates.Release!=null && domainEditor.Dirty && !appUpdates.Working?"Сохраните изменения в «Дополнительно», чтобы обновиться.":null);
             updateNotice.Render(appUpdates.Release==null?null:appUpdates.Release.Version,release==null?null:release.Version,appUpdateCard.Action.Enabled,install.Enabled,on || external);
             autoShell.Enabled = !appUpdates.Working && !busy;coreManual.Visible=expandedCore && coreManual.Tag!=null;

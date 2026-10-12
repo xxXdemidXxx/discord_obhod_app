@@ -9,4 +9,9 @@ releases/
 discord_obhod_app/
 *.zip
 *.tmp
+*.key
+*.pfx
+*.p12
+*.private.xml
+*.key-backup.json
 

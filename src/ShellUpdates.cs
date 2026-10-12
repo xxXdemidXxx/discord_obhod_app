@@ -28,17 +28,23 @@ namespace ZapretDesktop {
             client.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
         }
         public static Release Parse(string json) {
-            var data=new JavaScriptSerializer().Deserialize<Dictionary<string,object>>(json);
+            return ParseVerified(json,true);
+        }
+        static Release ParseVerified(string json,bool newerOnly) {
+            var data=Trust.Verify(json);
+            if(Convert.ToInt32(data["schema"])!=1)throw new InvalidDataException("Неизвестный формат обновления.");
+            var files=(Dictionary<string,object>)data["shell_files"];
+            foreach(var key in new[]{"exe","config"})if(!Regex.IsMatch(Convert.ToString(files[key]),@"^[a-f0-9]{64}$"))throw new InvalidDataException("Неправильный хеш файлов оболочки.");
             if(Convert.ToBoolean(data["draft"]) || Convert.ToBoolean(data["prerelease"]))return null;
             string tag=Convert.ToString(data["tag_name"]);
             if(!Regex.IsMatch(tag,@"^v\d+\.\d+\.\d+$"))throw new InvalidDataException("Некорректная версия релиза оболочки.");
             var version=new Version(tag.Substring(1));
-            if(version<=new Version(Current))return null;
+            if(newerOnly && version<=new Version(Current))return null;
             string versionedName="Obhod-"+tag.Substring(1)+"-win-x64.zip";
             foreach(Dictionary<string,object> asset in (ArrayList)data["assets"]) {
                 string name=Convert.ToString(asset["name"]);
                 if(name!="ByPass-win-x64.zip" && name!=versionedName)continue;
-                var release=new Release{Version=tag.Substring(1),Url=Convert.ToString(asset["browser_download_url"]),Size=Convert.ToInt64(asset["size"]),Digest=asset.ContainsKey("digest")?Convert.ToString(asset["digest"]):""};
+                var release=new Release{Version=tag.Substring(1),Url=Convert.ToString(asset["browser_download_url"]),Size=Convert.ToInt64(asset["size"]),Digest=asset.ContainsKey("digest")?Convert.ToString(asset["digest"]):"",Proof=json};
                 if(release.Url!="https://github.com/"+Repository+"/releases/download/"+tag+"/"+name || !Regex.IsMatch(release.Digest??"",@"^sha256:[a-fA-F0-9]{64}$") || release.Size<=0 || release.Size>64*1024*1024)throw new InvalidDataException("Релиз оболочки не прошёл проверку источника, размера или SHA-256.");
                 return release;
             }
@@ -48,9 +54,8 @@ namespace ZapretDesktop {
             // Published next to the ZIP, with its exact URL, size and SHA-256.
             // Release downloads do not consume the public REST API quota.
             var manifest=await GitHubMetadata.Get(client,"https://github.com/"+Repository+"/releases/latest/download/update.json",true);
-            if(manifest!=null)return Parse(manifest);
-            var json=await GitHubMetadata.Get(client,"https://api.github.com/repos/"+Repository+"/releases/latest",true);
-            return json==null?null:Parse(json);
+            if(manifest==null)throw new InvalidDataException("Для последнего выпуска нет подписанных данных обновления. Попробуйте позже.");
+            return Parse(manifest);
         }
         public static void ValidateBinary(string path,string version) {
             var name=AssemblyName.GetAssemblyName(path);
@@ -67,6 +72,9 @@ namespace ZapretDesktop {
         }
         async Task<string> StageCore(Release release,string root,IProgress<int> progress,CancellationToken token) {
             token.ThrowIfCancellationRequested();
+            var trusted=ParseVerified(release.Proof,false);
+            if(trusted==null || release.Version!=trusted.Version || release.Digest!=trusted.Digest || release.Url!=trusted.Url || release.Size!=trusted.Size)throw new InvalidDataException("Параметры обновления отличаются от подписанного выпуска.");
+            Trust.NoLinks(root);
             string stage=Path.Combine(root,"data","app-updates",Guid.NewGuid().ToString("N"));Directory.CreateDirectory(stage);
             try {
                 string zip=Path.Combine(stage,"update.zip");
@@ -88,9 +96,11 @@ namespace ZapretDesktop {
                 // Only the shell is replaced. All settings and engine versions remain in place.
                 string prepared=Path.Combine(stage,"ByPass.exe");File.Copy(executable,prepared);
                 File.Copy(executable+".config",prepared+".config");
-                File.WriteAllText(Path.Combine(stage,"verified.sha256"),Updater.Hash(prepared));
-                File.WriteAllText(Path.Combine(stage,"version.txt"),release.Version);
-                File.WriteAllText(Path.Combine(stage,"config.sha256"),Updater.Hash(prepared+".config"));
+                string ownerProof=File.ReadAllText(Path.Combine(Path.GetDirectoryName(executable),OwnerIdentity.ProofName));
+                OwnerIdentity.Verify(ownerProof,prepared,prepared+".config",release.Version);
+                File.WriteAllText(Path.Combine(stage,OwnerIdentity.ProofName),ownerProof);
+                Trust.VerifyShell(release.Proof,prepared,prepared+".config");
+                File.WriteAllText(Path.Combine(stage,"release-proof.json"),release.Proof);
                 Directory.Delete(unpacked,true);File.Delete(zip);
                 return prepared;
             }catch{try{Directory.Delete(stage,true);}catch{}throw;}
@@ -103,11 +113,16 @@ namespace ZapretDesktop {
         }
         static void ValidatePrepared(string source) {
             string stage=Path.GetDirectoryName(source);
-            if(Updater.Hash(source)!=File.ReadAllText(Path.Combine(stage,"verified.sha256")).Trim())throw new InvalidDataException("Файлы обновления изменились после проверки.");
-            ValidateBinary(source,File.ReadAllText(Path.Combine(stage,"version.txt")).Trim());
-            if(Updater.Hash(source+".config")!=File.ReadAllText(Path.Combine(stage,"config.sha256")).Trim())throw new InvalidDataException("Конфигурация обновления изменилась после проверки.");
+            string proofPath=Path.Combine(stage,"release-proof.json");Trust.NoLinks(proofPath);
+            if(!File.Exists(proofPath) || new FileInfo(proofPath).Length>1024*1024)throw new InvalidDataException("Нет подписанного подтверждения обновления.");
+            string proof=File.ReadAllText(proofPath);var release=ParseVerified(proof,false);
+            if(release==null)throw new InvalidDataException("Неправильный выпуск.");
+            Trust.VerifyShell(proof,source,source+".config");ValidateBinary(source,release.Version);
+            OwnerIdentity.Verify(File.ReadAllText(Path.Combine(stage,OwnerIdentity.ProofName)),source,source+".config",release.Version);
         }
         public static async Task Launch(string prepared,string target,bool reconnect) {
+            using(var executableLock=new FileStream(prepared,FileMode.Open,FileAccess.Read,FileShare.Read))
+            using(var configLock=new FileStream(prepared+".config",FileMode.Open,FileAccess.Read,FileShare.Read)) {
             InstallationRoot(prepared,target);ValidatePrepared(prepared);
             string ready=Path.Combine(Path.GetDirectoryName(prepared),"helper-ready.txt");
             if(File.Exists(ready))File.Delete(ready);
@@ -118,6 +133,7 @@ namespace ZapretDesktop {
                     if(watch.ElapsedMilliseconds>10000){try{helper.Kill();}catch{}throw new IOException("Установка не ответила.");}
                     await Task.Delay(50);
                 }
+            }
             }
         }
         public sealed class Outcome {
@@ -140,7 +156,9 @@ namespace ZapretDesktop {
             }catch{return null;}
         }
         public static void Apply(string[] args) {
-            string target=null,root=null,backup=null;bool replaced=false,configReplaced=false,configCreated=false;string configBackup=null;
+            using(var executableLock=new FileStream(Application.ExecutablePath,FileMode.Open,FileAccess.Read,FileShare.Read))
+            using(var configLock=new FileStream(Application.ExecutablePath+".config",FileMode.Open,FileAccess.Read,FileShare.Read)) {
+            string target=null,root=null,backup=null;bool replaced=false,configReplaced=false,configCreated=false,proofReplaced=false;string configBackup=null,oldProof=null;
             bool handshake=args.Contains("--ready"),reconnect=args.Contains("--connect");int pid=0;
             try {
                 pid=Int32.Parse(args[1]);string source=Application.ExecutablePath;
@@ -153,10 +171,12 @@ namespace ZapretDesktop {
                 File.Copy(source+".config",target+".config.new",true);
                 if(File.Exists(target+".config")){File.Replace(target+".config.new",target+".config",configBackup,true);configReplaced=true;}
                 else {File.Move(target+".config.new",target+".config");configCreated=true;}
+                string identity=Path.Combine(root,OwnerIdentity.ProofName);oldProof=File.Exists(identity)?File.ReadAllText(identity):null;
+                File.WriteAllText(identity,File.ReadAllText(Path.Combine(Path.GetDirectoryName(source),OwnerIdentity.ProofName)));proofReplaced=true;
                 WriteOutcome(root,true,null);
                 Process.Start(new ProcessStartInfo(target,reconnect?"--connect":""){UseShellExecute=true,WorkingDirectory=root});
             }catch(Exception ex) {
-                try {if(configReplaced)File.Copy(configBackup,target+".config",true);else if(configCreated)File.Delete(target+".config");if(replaced)File.Copy(backup,target,true);}catch{}
+                try {if(proofReplaced){string identity=Path.Combine(root,OwnerIdentity.ProofName);if(oldProof==null)File.Delete(identity);else File.WriteAllText(identity,oldProof);}if(configReplaced)File.Copy(configBackup,target+".config",true);else if(configCreated)File.Delete(target+".config");if(replaced)File.Copy(backup,target,true);}catch{}
                 // The existing application displays the result in its Updates tab.
                 // A helper must never open an error dialog or expose internal details.
                 bool parentAlive=false;try{using(var parent=Process.GetProcessById(pid))parentAlive=!parent.HasExited;}catch{}
@@ -166,6 +186,7 @@ namespace ZapretDesktop {
                         try{WaitForExit(pid);if(File.Exists(target))Process.Start(new ProcessStartInfo(target,reconnect?"--connect":""){UseShellExecute=true,WorkingDirectory=root});}catch{}
                     }
                 }
+            }
             }
         }
         static void WaitForExit(int pid) {

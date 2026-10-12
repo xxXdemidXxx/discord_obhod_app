@@ -9,7 +9,7 @@ using System.Web.Script.Serialization;
 
 namespace ZapretDesktop {
     public sealed class Settings {
-        public string Engine = "1.10.2";
+        public string Engine = "1.10.3";
         public string PreviousEngine = "";
         public string Strategy = "general.bat";
         public bool CheckUpdates = true;
@@ -146,7 +146,11 @@ namespace ZapretDesktop {
         }
     }
 
-    public sealed class EngineRunner : IDisposable {
+    public sealed class DirectEngineRunner : IDisposable {
+#if TESTING
+        readonly bool testStub;
+        public DirectEngineRunner(bool testStub=false){this.testStub=testStub;}
+#endif
         private Process process;
         private OwnedJob job;
         bool timestampsEnabled;
@@ -158,6 +162,11 @@ namespace ZapretDesktop {
             if (Running) return;
             if (Conflict) throw new InvalidOperationException("Уже запущен другой winws.exe или служба zapret. Остановите её через исходный service.bat перед запуском здесь.");
             Stop();
+#if TESTING
+            if(!testStub)Trust.VerifyEngine(engine);
+#else
+            Trust.VerifyEngine(engine);
+#endif
             Strategy.ValidateEngine(engine);
             var arguments = Strategy.Arguments(engine, strategy);
             if (!timestampsEnabled && Strategy.NeedsTcpTimestamps(arguments)) {
