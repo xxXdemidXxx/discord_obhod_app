@@ -120,6 +120,35 @@ namespace ZapretDesktop {
             Trust.VerifyShell(proof,source,source+".config");ValidateBinary(source,release.Version);
             OwnerIdentity.Verify(File.ReadAllText(Path.Combine(stage,OwnerIdentity.ProofName)),source,source+".config",release.Version);
         }
+#if TESTING
+        internal static Func<string,Task<string>> LegacyProofForTest = null;
+#endif
+        static async Task RecoverLegacyProof(string source) {
+            string stage=Path.GetDirectoryName(source);
+            if(File.Exists(Path.Combine(stage,"release-proof.json")))return;
+            // 0.3/0.4 stage only EXE/config and plain hashes. Those hashes are
+            // hints for compatibility, never a trust anchor. Fetch owner-signed
+            // receipts for the helper's exact version before acknowledging it.
+            foreach(string file in new[]{"verified.sha256","config.sha256","version.txt"}) {
+                string path=Path.Combine(stage,file);Trust.NoLinks(path);
+                if(!File.Exists(path) || new FileInfo(path).Length>128)throw new InvalidDataException("Нет подписанного подтверждения обновления.");
+            }
+            if(File.ReadAllText(Path.Combine(stage,"version.txt")).Trim()!=Current)throw new InvalidDataException("Неправильная версия старого обновления.");
+            using(var http=new HttpClient{Timeout=TimeSpan.FromSeconds(3)}) {
+                http.DefaultRequestHeaders.UserAgent.ParseAdd("ByPass/"+Current);
+                string prefix="https://github.com/"+Repository+"/releases/download/v"+Current+"/";
+                Func<string,Task<string>> fetch=url=>GitHubMetadata.Get(http,url);
+#if TESTING
+                if(LegacyProofForTest!=null)fetch=LegacyProofForTest;
+#endif
+                string proof=await fetch(prefix+"update.json");var release=ParseVerified(proof,false);
+                if(release==null || release.Version!=Current)throw new InvalidDataException("Подписанный выпуск не соответствует обновлению.");
+                Trust.VerifyShell(proof,source,source+".config");
+                string identity=await fetch(prefix+OwnerIdentity.ProofName);OwnerIdentity.Verify(identity,source,source+".config",Current);
+                File.WriteAllText(Path.Combine(stage,OwnerIdentity.ProofName),identity);
+                File.WriteAllText(Path.Combine(stage,"release-proof.json"),proof);
+            }
+        }
         public static async Task Launch(string prepared,string target,bool reconnect) {
             using(var executableLock=new FileStream(prepared,FileMode.Open,FileAccess.Read,FileShare.Read))
             using(var configLock=new FileStream(prepared+".config",FileMode.Open,FileAccess.Read,FileShare.Read)) {
@@ -162,7 +191,8 @@ namespace ZapretDesktop {
             bool handshake=args.Contains("--ready"),reconnect=args.Contains("--connect");int pid=0;
             try {
                 pid=Int32.Parse(args[1]);string source=Application.ExecutablePath;
-                root=InstallationRoot(source,args[2]);target=Path.GetFullPath(args[2]);ValidatePrepared(source);
+                root=InstallationRoot(source,args[2]);target=Path.GetFullPath(args[2]);
+                RecoverLegacyProof(source).GetAwaiter().GetResult();ValidatePrepared(source);
                 if(handshake)File.WriteAllText(Path.Combine(Path.GetDirectoryName(source),"helper-ready.txt"),"ready");
                 WaitForExit(pid);
                 backup=target+".previous";configBackup=target+".config.previous";

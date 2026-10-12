@@ -100,6 +100,38 @@ namespace ZapretDesktop {
                 Thread.Sleep(100);
             }
         }
+        static void LegacyMigrationTest(string root) {
+            string folder=Path.Combine(root,"tests","fixture-legacy-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(folder);
+            try {
+                string feed=Path.Combine(folder,"feed");Directory.CreateDirectory(feed);
+                string exe=Path.Combine(root,"tests","Obhod-probe.exe"),config=Path.Combine(folder,"source.config"),archive=Path.Combine(folder,"source.zip");File.WriteAllText(config,"<configuration/>");
+                using(var zip=ZipFile.Open(archive,ZipArchiveMode.Create)){zip.CreateEntryFromFile(exe,"Obhod/Obhod.exe");zip.CreateEntryFromFile(config,"Obhod/Obhod.exe.config");}
+                var serializer=new System.Web.Script.Serialization.JavaScriptSerializer();
+                string proof=Proof(ShellUpdates.Current,exe,config,"sha256:"+Trust.Hash(archive),new FileInfo(archive).Length);
+                var outer=serializer.Deserialize<System.Collections.Generic.Dictionary<string,object>>(proof);
+                var payload=serializer.Deserialize<System.Collections.Generic.Dictionary<string,object>>(System.Text.Encoding.UTF8.GetString(Convert.FromBase64String((string)outer["signed_payload"])));
+                foreach(var item in payload)outer[item.Key]=item.Value;
+                File.WriteAllText(Path.Combine(feed,"update.json"),serializer.Serialize(outer));File.WriteAllText(Path.Combine(feed,OwnerIdentity.ProofName),BuildProof(exe,config));
+                string target=Path.Combine(folder,"Obhod.exe");File.WriteAllText(target,"old installation");File.WriteAllText(target+".config","<configuration/>");
+                var start=new ProcessStartInfo(Path.Combine(root,"tests","LegacyBridge.exe"),Strategy.Quote(folder)+" "+Strategy.Quote(Path.Combine(feed,"update.json"))+" "+Strategy.Quote(archive)){UseShellExecute=false,CreateNoWindow=true};start.EnvironmentVariables["BYPASS_LEGACY_TEST_FEED"]=feed;
+                using(var bridge=Process.Start(start)){bool finished=bridge.WaitForExit(15000);if(!finished)bridge.Kill();Assert(finished && bridge.ExitCode==0,"Actual 0.4.4 updater stages new shell and receives signed helper readiness");}
+                var watch=Stopwatch.StartNew();while(!File.Exists(Path.Combine(folder,"updated.txt")) && watch.ElapsedMilliseconds<5000)Thread.Sleep(20);
+                Assert(File.Exists(Path.Combine(folder,"updated.txt")) && Trust.Hash(target)==Trust.Hash(exe),"Legacy update installs exact owner-signed executable and restarts");
+                var outcome=ShellUpdates.TakeOutcome(folder);Assert(outcome!=null && outcome.Success,"Legacy migration records successful signed update");
+                Assert(OwnerIdentity.Current(target),"Legacy migration restores author receipt for visible confirmation");
+                // A local attacker can forge all old hash sidecars, but cannot
+                // forge the independently signed file hashes obtained by the helper.
+                foreach(bool tamperExe in new[]{true,false}) {
+                    string stage=Path.Combine(folder,"data","app-updates",Guid.NewGuid().ToString("N"));Directory.CreateDirectory(stage);
+                    string source=Path.Combine(stage,"Obhod.exe");File.Copy(exe,source);File.Copy(config,source+".config");
+                    if(tamperExe)File.AppendAllText(source,"forged");else File.WriteAllText(source+".config","<configuration><!--forged--></configuration>");
+                    File.WriteAllText(Path.Combine(stage,"verified.sha256"),Trust.Hash(source));File.WriteAllText(Path.Combine(stage,"config.sha256"),Trust.Hash(source+".config"));File.WriteAllText(Path.Combine(stage,"version.txt"),ShellUpdates.Current);
+                    var helperStart=new ProcessStartInfo(source,"--apply-update "+Process.GetCurrentProcess().Id+" "+Strategy.Quote(target)+" --ready"){UseShellExecute=false,CreateNoWindow=true};helperStart.EnvironmentVariables["BYPASS_LEGACY_TEST_FEED"]=feed;
+                    using(var helper=Process.Start(helperStart)){bool finished=helper.WaitForExit(5000);if(!finished)helper.Kill();Assert(finished && !File.Exists(Path.Combine(stage,"helper-ready.txt")),"Legacy helper rejects forged "+(tamperExe?"EXE":"config")+" and matching plain sidecars");}
+                    Assert(Trust.Hash(target)==Trust.Hash(exe),"Rejected legacy update preserves installed binary");
+                }
+            }finally{RemoveFixture(folder);}
+        }
         static void Reject(Action action, string message) { try { action(); } catch (InvalidDataException) { count++; return; } throw new Exception(message); }
         public static void Copy(string from, string to) {
             Directory.CreateDirectory(to);
@@ -112,7 +144,7 @@ namespace ZapretDesktop {
                 var root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".."));
                 var local = Path.GetFullPath(Path.Combine(root, "..", "zapret-discord-youtube-1.10.2"));
                 var official = Path.Combine(root, "downloads", "official-1.10.3", "zapret-discord-youtube-1.10.3");
-                local=official;SecurityTests(root,official); SelectionTests().GetAwaiter().GetResult(); DomainTests(root); UpdateFeedTests().GetAwaiter().GetResult(); AppUpdateSessionTests(root).GetAwaiter().GetResult(); StageTests(root).GetAwaiter().GetResult(); ShellReplacementTest(root); ShellRollbackTest(root); ShellHandshakeTest(root);
+                local=official;SecurityTests(root,official);LegacyMigrationTest(root); SelectionTests().GetAwaiter().GetResult(); DomainTests(root); UpdateFeedTests().GetAwaiter().GetResult(); AppUpdateSessionTests(root).GetAwaiter().GetResult(); StageTests(root).GetAwaiter().GetResult(); ShellReplacementTest(root); ShellRollbackTest(root); ShellHandshakeTest(root);
                 foreach (var engine in new[] {local, official}.Distinct()) {
                     Strategy.ValidateEngine(engine);
                     var profiles = Directory.GetFiles(engine, "general*.bat"); Assert(profiles.Length == 22, "22 upstream profiles expected");

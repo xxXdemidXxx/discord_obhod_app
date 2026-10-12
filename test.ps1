@@ -26,5 +26,8 @@ $output = Join-Path $PSScriptRoot 'tests\Tests.exe'
 if ($LASTEXITCODE -ne 0) { throw 'Test build failed' }
 & $compiler /nologo /define:TESTING /target:winexe /main:ZapretDesktop.UpdateProbe /platform:x64 @resources "/out:$PSScriptRoot\tests\Obhod-probe.exe" /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Web.Extensions.dll /reference:System.Net.Http.dll /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll $source (Join-Path $PSScriptRoot 'tests\UpdateProbe.cs')
 if ($LASTEXITCODE -ne 0) { throw 'Update probe build failed' }
+$legacy=@('tests\legacy-0.4\ShellUpdates.cs','src\Updates.cs','src\Engine.cs','src\Trust.cs','src\OwnerIdentity.cs','src\OwnedJob.cs','src\GitHubMetadata.cs','tests\LegacyBridge.cs') | ForEach-Object {Join-Path $PSScriptRoot $_}
+& $compiler /nologo /target:exe /main:LegacyBridge /platform:x64 @resources "/out:$PSScriptRoot\tests\LegacyBridge.exe" /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Web.Extensions.dll /reference:System.Net.Http.dll /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll $legacy
+if ($LASTEXITCODE -ne 0) {throw 'Legacy updater bridge build failed'}
 if ($Network) { & $output --network } else { & $output }
 if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
