@@ -88,6 +88,18 @@ namespace ZapretDesktop {
         [DllImport("shell32.dll", SetLastError=true)] static extern IntPtr CommandLineToArgvW([MarshalAs(UnmanagedType.LPWStr)] string command, out int argc);
         [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
         static void Assert(bool condition, string message) { if (!condition) throw new Exception(message); count++; }
+        static void RemoveFixture(string folder) {
+            string path=Path.GetFullPath(folder),prefix=Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"fixture-"));
+            if(!path.StartsWith(prefix,StringComparison.OrdinalIgnoreCase))throw new InvalidDataException("Cleanup path is not a test fixture.");
+            // A restarted probe may still be unloading its image; Defender can
+            // briefly retain a file handle too. Retry cleanup without hiding errors.
+            for(int attempt=0;;attempt++) {
+                try{if(Directory.Exists(path))Directory.Delete(path,true);return;}
+                catch(IOException){if(attempt>=30)throw;}
+                catch(UnauthorizedAccessException){if(attempt>=30)throw;}
+                Thread.Sleep(100);
+            }
+        }
         static void Reject(Action action, string message) { try { action(); } catch (InvalidDataException) { count++; return; } throw new Exception(message); }
         public static void Copy(string from, string to) {
             Directory.CreateDirectory(to);
@@ -240,7 +252,7 @@ namespace ZapretDesktop {
                 }
                 http=new MockHttp{Reply=url=>Response(500,"Unavailable")};
                 using(var session=new AppUpdateSession(new ShellUpdates(http))){await session.Check();Assert(session.State==AppUpdateState.Failed && session.ActionText=="Повторить проверку","Check failure offers a distinct check retry");http.Reply=url=>Response(200,Feed(ShellUpdates.Current));await session.Check();Assert(session.State==AppUpdateState.Current,"Check retry recovers in the same view");}
-            }finally{Directory.Delete(folder,true);}
+            }finally{RemoveFixture(folder);}
         }
         static async Task StageTests(string root){
             foreach(string brand in new[]{"Obhod","ByPass"}) {
@@ -277,7 +289,7 @@ namespace ZapretDesktop {
                     bool refused=false;try{await ShellUpdates.Launch(prepared,Path.Combine(folder,brand+".exe"),false);}catch(InvalidDataException){refused=true;}
                     Assert(refused,"Changed prepared binary is rejected before starting a helper or stopping the application");
                 }
-            }finally{Directory.Delete(folder,true);}
+            }finally{RemoveFixture(folder);}
             }
         }
         static void Pump(Task task){
@@ -356,7 +368,7 @@ namespace ZapretDesktop {
                 Assert(Updater.Hash(target)==oldHash && File.ReadAllText(target+".config")=="<configuration/>","Failure after EXE replacement restores the old executable and config");
                 var outcome=ShellUpdates.TakeOutcome(folder);Assert(outcome!=null && !outcome.Success && !String.IsNullOrEmpty(outcome.Error),"Rollback leaves a result for inline reporting on restart");
                 Assert(File.Exists(Path.Combine(folder,"updated.txt")) && File.ReadAllText(Path.Combine(folder,"updated.txt")).Contains("--connect"),"Rolled back application restarts and restores its connection");
-            }finally{Directory.Delete(folder,true);}
+            }finally{RemoveFixture(folder);}
         }
         static void InteractiveUiChecks(MainForm form,string root) {
             var tabs=FindTabs(form);tabs.SelectedIndex=0;var dashboard=AllControls(form).OfType<Dashboard>().Single();
@@ -416,7 +428,7 @@ namespace ZapretDesktop {
                 Assert(Updater.Hash(source)==Updater.Hash(target),"Exact verified executable installed");
                 Assert(File.ReadAllText(target+".previous")=="previous executable" && File.ReadAllText(target+".config.previous")=="previous config","Old executable and configuration backed up");
                 Assert(File.ReadAllText(settings)=="preserved settings","Shell update does not overwrite user settings");
-            } finally {Directory.Delete(folder,true);}
+            } finally {RemoveFixture(folder);}
             }
         }
         static void ShellHandshakeTest(string root){
@@ -430,7 +442,7 @@ namespace ZapretDesktop {
                     try{var watch=Stopwatch.StartNew();while(!File.Exists(Path.Combine(stage,"helper-ready.txt")) && watch.ElapsedMilliseconds<5000 && !helper.HasExited)Thread.Sleep(20);Assert(File.Exists(Path.Combine(stage,"helper-ready.txt")) && !helper.HasExited && File.ReadAllText(target)=="still running","Validated helper acknowledges readiness and waits before replacing the running application");}
                     finally{if(!helper.HasExited){helper.Kill();helper.WaitForExit(5000);}}
                 }
-            }finally{Directory.Delete(folder,true);}
+            }finally{RemoveFixture(folder);}
         }
         static void DomainTests(string root) {
             string normalized=DomainLists.Normalize("Example.COM\nexample.com\nпример.рф\n# comment\n",0);
@@ -442,7 +454,7 @@ namespace ZapretDesktop {
             Reject(()=>DomainLists.Normalize("1",2),"IPv4 shorthand rejected");
             Assert(DomainLists.FromInput("https://пример.рф/path",0)=="xn--e1afmkfd.xn--p1ai","Pasted website URL becomes a normalized domain");
             var folder=Path.Combine(root,"tests","fixture-domains-"+Guid.NewGuid().ToString("N"));
-            try{DomainLists.Write(folder,0,"first.example");string path=DomainLists.FilePath(folder,0);Reject(()=>DomainLists.Write(folder,0,"invalid url"),"Invalid list cannot overwrite saved entries");Assert(File.ReadAllText(path).Contains("first.example"),"Original list preserved on invalid input");DomainLists.Write(folder,0,"second.example");Assert(File.ReadAllText(path+".bak").Contains("first.example"),"Atomic domain replacement preserves backup");DomainLists.Write(folder,0,"");Assert(DomainLists.Read(folder,0)=="" && new FileInfo(path).Length>0,"Empty user lists remain compatible with the engine and show no placeholder");File.WriteAllText(path,"# Never leave this file empty\r\ndomain.example.abc\r\n");Assert(DomainLists.Read(folder,0)=="","Upstream technical comment is hidden from the editor");DomainLists.Write(folder,2,"");Assert(DomainLists.Read(folder,2)=="" && new FileInfo(DomainLists.FilePath(folder,2)).Length>0,"Empty IP exclusions retain the engine sentinel");}finally{Directory.Delete(folder,true);}
+            try{DomainLists.Write(folder,0,"first.example");string path=DomainLists.FilePath(folder,0);Reject(()=>DomainLists.Write(folder,0,"invalid url"),"Invalid list cannot overwrite saved entries");Assert(File.ReadAllText(path).Contains("first.example"),"Original list preserved on invalid input");DomainLists.Write(folder,0,"second.example");Assert(File.ReadAllText(path+".bak").Contains("first.example"),"Atomic domain replacement preserves backup");DomainLists.Write(folder,0,"");Assert(DomainLists.Read(folder,0)=="" && new FileInfo(path).Length>0,"Empty user lists remain compatible with the engine and show no placeholder");File.WriteAllText(path,"# Never leave this file empty\r\ndomain.example.abc\r\n");Assert(DomainLists.Read(folder,0)=="","Upstream technical comment is hidden from the editor");DomainLists.Write(folder,2,"");Assert(DomainLists.Read(folder,2)=="" && new FileInfo(DomainLists.FilePath(folder,2)).Length>0,"Empty IP exclusions retain the engine sentinel");}finally{RemoveFixture(folder);}
         }
         static async Task SelectionTests() {
             string running=null; int checks=0; var started=new System.Collections.Generic.List<string>();
