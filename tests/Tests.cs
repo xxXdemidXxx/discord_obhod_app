@@ -170,7 +170,7 @@ namespace ZapretDesktop {
                 var root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".."));
                 var local = Path.GetFullPath(Path.Combine(root, "..", "zapret-discord-youtube-1.10.2"));
                 var official = Path.Combine(root, "downloads", "official-1.10.3", "zapret-discord-youtube-1.10.3");
-                local=official;SecurityTests(root,official);LegacyMigrationTest(root); FeedbackAndDriverTests(root,official).GetAwaiter().GetResult(); SelectionTests().GetAwaiter().GetResult(); ServiceProbeTests().GetAwaiter().GetResult(); DomainTests(root); UpdateFeedTests().GetAwaiter().GetResult(); AppUpdateSessionTests(root).GetAwaiter().GetResult(); StageTests(root).GetAwaiter().GetResult(); ShellReplacementTest(root); ShellRollbackTest(root); ShellHandshakeTest(root);
+                local=official;SecurityTests(root,official);LegacyMigrationTest(root); DriverRecoveryTests(root); FeedbackAndDriverTests(root,official).GetAwaiter().GetResult(); SelectionTests().GetAwaiter().GetResult(); ServiceProbeTests().GetAwaiter().GetResult(); DomainTests(root); UpdateFeedTests().GetAwaiter().GetResult(); AppUpdateSessionTests(root).GetAwaiter().GetResult(); StageTests(root).GetAwaiter().GetResult(); ShellReplacementTest(root); ShellRollbackTest(root); ShellHandshakeTest(root);
                 foreach (var engine in new[] {local, official}.Distinct()) {
                     Strategy.ValidateEngine(engine);
                     var profiles = Directory.GetFiles(engine, "general*.bat"); Assert(profiles.Length == 22, "22 upstream profiles expected");
@@ -718,6 +718,38 @@ namespace ZapretDesktop {
             var partial=Enumerable.Range(0,ServiceChecks.Targets.Length).Select(i=>new CheckResult{State=i==4?0:1}).ToArray();
             var selected=await StrategySelector.Run(new[]{"api-only"},(name,token)=>Task.FromResult(0),()=>{},token=>Task.FromResult(partial),CancellationToken.None,null,null,true);
             Assert(selected.Winner==null,"Strategy with website and Gateway working but updater blocked is not auto-selected");
+        }
+        static void DriverRecoveryTests(string root) {
+            string folder=Path.Combine(root,"tests","fixture-driver-recovery-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(folder);
+            try {
+                string path=Path.Combine(folder,"zapret-discord-youtube-1.9.8c","bin","WinDivert64.sys");
+                Func<DriverRegistration> old=()=>new DriverRegistration{Path=@"\??\"+path,Type=1,Start=3,State=1};
+                int deletes=0,reads=0;var log=new System.Collections.Generic.List<string>();
+                bool repaired=DriverServiceRecovery.TryRepair(()=>{reads++;return old();},()=>deletes++,()=>false,DriverServiceRecovery.MissingFile,log.Add);
+                Assert(repaired && deletes==1 && reads==2 && log.Last().Contains("1.9.8c"),"Exact reported missing 1.9.8c driver registration is removed once after revalidation");
+                Assert(!Directory.Exists(Path.GetDirectoryName(path)),"Recovery does not recreate or write into the user's obsolete zapret folder");
+                Directory.CreateDirectory(Path.GetDirectoryName(path));File.WriteAllText(path,"fixture");deletes=0;
+                Assert(!DriverServiceRecovery.TryRepair(old,()=>deletes++,()=>false,DriverServiceRecovery.MissingFile,null) && deletes==0,"Existing stopped external driver registration remains untouched");
+                File.Delete(path);
+                foreach(uint state in new uint[]{2,3,4,5,6,7}) {
+                    Assert(!DriverServiceRecovery.TryRepair(()=>{var value=old();value.State=state;return value;},()=>deletes++,()=>false,DriverServiceRecovery.MissingFile,null) && deletes==0,"Active or transitional WinDivert state "+state+" is never stopped or deleted");
+                }
+                foreach(uint type in new uint[]{2,16,32}) {
+                    Assert(!DriverServiceRecovery.TryRepair(()=>{var value=old();value.Type=type;return value;},()=>deletes++,()=>false,DriverServiceRecovery.MissingFile,null),"Only a kernel driver qualifies for cleanup");
+                }
+                foreach(uint start in new uint[]{0,1,2,4}) {
+                    Assert(!DriverServiceRecovery.TryRepair(()=>{var value=old();value.Start=start;return value;},()=>deletes++,()=>false,DriverServiceRecovery.MissingFile,null),"Boot, automatic and disabled services are not reset");
+                }
+                reads=0;Assert(!DriverServiceRecovery.TryRepair(()=>{reads++;return old();},()=>deletes++,()=>true,DriverServiceRecovery.MissingFile,null) && reads==0 && deletes==0,"External winws prevents all recovery activity");
+                int conflicts=0;Assert(!DriverServiceRecovery.TryRepair(old,()=>deletes++,()=>++conflicts>1,DriverServiceRecovery.MissingFile,null) && deletes==0,"External winws appearing between inspections cancels deletion");
+                reads=0;Assert(!DriverServiceRecovery.TryRepair(()=>{var value=old();if(++reads>1)value.State=4;return value;},()=>deletes++,()=>false,DriverServiceRecovery.MissingFile,null) && deletes==0,"Driver becoming active during inspection is preserved");
+                reads=0;Assert(!DriverServiceRecovery.TryRepair(()=>{var value=old();if(++reads>1)value.Path=path+".changed";return value;},()=>deletes++,()=>false,p=>true,null) && deletes==0,"Changed registration path cancels stale repair");
+                Assert(!DriverServiceRecovery.TryRepair(()=>null,()=>deletes++,()=>false,DriverServiceRecovery.MissingFile,null) && deletes==0,"Absent service needs no cleanup");
+                Assert(!DriverServiceRecovery.TryRepair(old,()=>deletes++,()=>false,p=>false,null) && deletes==0,"Unknown or inaccessible file is not treated as missing");
+                Assert(!DriverServiceRecovery.MissingFile(@"\\server\share\WinDivert64.sys") && !DriverServiceRecovery.MissingFile(Path.Combine(folder,"other.sys")),"Network paths and unrelated driver filenames are excluded");
+                bool denied=false;try{DriverServiceRecovery.TryRepair(old,()=>{throw new System.ComponentModel.Win32Exception(5);},()=>false,DriverServiceRecovery.MissingFile,null);}catch(System.ComponentModel.Win32Exception){denied=true;}
+                Assert(denied,"SCM access denial is propagated rather than silently claiming repair");
+            }finally{RemoveFixture(folder);}
         }
         static async Task FeedbackAndDriverTests(string root,string official) {
             string folder=Path.Combine(root,"tests","fixture-feedback-"+Guid.NewGuid().ToString("N"));

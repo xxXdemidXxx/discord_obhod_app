@@ -74,7 +74,7 @@ namespace ZapretDesktop {
                 if(!response.WaitOne(15000)){connected=false;pipe.Dispose();running=false;throw new IOException("Компонент запуска не ответил.");}
                 if(reply==null)throw new IOException("Связь с компонентом запуска прервана.",failure);
                 running=Convert.ToBoolean(reply["running"]);if(!running)ready=false;string error=(string)reply["error"];
-                if(error.Length>0){object kind;if(reply.TryGetValue("error_kind",out kind) && (string)kind=="setup")throw new EngineSetupException("Не удалось подготовить ядро.\n"+error);throw new EngineStartException(error);}
+                if(error.Length>0){object kind;if(reply.TryGetValue("error_kind",out kind) && (string)kind=="driver")throw new EngineDriverException(error);if(reply.TryGetValue("error_kind",out kind) && (string)kind=="setup")throw new EngineSetupException("Не удалось подготовить ядро.\n"+error);throw new EngineStartException(error);}
             }
         }
         public void Start(string engine,string strategy) {

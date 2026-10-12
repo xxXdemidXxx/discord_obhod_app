@@ -123,6 +123,7 @@ namespace ZapretDesktop {
                                         foreach(string driverPath in driverPaths)HostWire.Write(pipe,new{type="log",text="WinDivert: зарегистрированный путь "+driverPath+" · файл "+(File.Exists(NormalizeDriverPath(driverPath))?"есть":"отсутствует")});
                                         foreach(string repaired in RestoreDriverFiles(HostWire.ProtectedRoot,inputs,driverPaths))
                                             HostWire.Write(pipe,new{type="log",text="Восстановлен проверенный драйвер ByPass: "+repaired});
+                                        DriverServiceRecovery.Repair(line=>HostWire.Write(pipe,new{type="log",text=line}));
                                         preparing=false;runner.Start(snapshot,strategy);break;
                                     case "stop":runner.Stop();break;
                                     case "status":break;
@@ -130,7 +131,7 @@ namespace ZapretDesktop {
                                     default:throw new InvalidDataException("Неизвестная команда.");
                                 }
                                 HostWire.Write(pipe,new{type="reply",running=runner.Running,error=""});
-                            }catch(Exception ex){HostWire.Write(pipe,new{type="reply",running=runner.Running,error=ex.Message,error_kind=preparing?"setup":"strategy"});}
+                            }catch(Exception ex){HostWire.Write(pipe,new{type="reply",running=runner.Running,error=ex.Message,error_kind=ex is EngineDriverException?"driver":preparing?"setup":"strategy"});}
                         }
                     }finally{runner.Stop();foreach(string folder in snapshots)try{CleanupSnapshot(folder,RegisteredDriverPaths());}catch{}}
                 }
