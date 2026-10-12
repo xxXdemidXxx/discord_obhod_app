@@ -24,7 +24,7 @@ namespace ZapretDesktop {
         public ShellUpdates(HttpMessageHandler handler) {
             ServicePointManager.SecurityProtocol=SecurityProtocolType.Tls12;
             client=handler==null?new HttpClient():new HttpClient(handler);client.Timeout=TimeSpan.FromMinutes(3);
-            client.DefaultRequestHeaders.UserAgent.ParseAdd("Obhod/"+Current);
+            client.DefaultRequestHeaders.UserAgent.ParseAdd("ByPass/"+Current);
             client.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
         }
         public static Release Parse(string json) {
@@ -34,9 +34,10 @@ namespace ZapretDesktop {
             if(!Regex.IsMatch(tag,@"^v\d+\.\d+\.\d+$"))throw new InvalidDataException("Некорректная версия релиза оболочки.");
             var version=new Version(tag.Substring(1));
             if(version<=new Version(Current))return null;
-            string name="Obhod-"+tag.Substring(1)+"-win-x64.zip";
+            string versionedName="Obhod-"+tag.Substring(1)+"-win-x64.zip";
             foreach(Dictionary<string,object> asset in (ArrayList)data["assets"]) {
-                if(Convert.ToString(asset["name"])!=name)continue;
+                string name=Convert.ToString(asset["name"]);
+                if(name!="ByPass-win-x64.zip" && name!=versionedName)continue;
                 var release=new Release{Version=tag.Substring(1),Url=Convert.ToString(asset["browser_download_url"]),Size=Convert.ToInt64(asset["size"]),Digest=asset.ContainsKey("digest")?Convert.ToString(asset["digest"]):""};
                 if(release.Url!="https://github.com/"+Repository+"/releases/download/"+tag+"/"+name || !Regex.IsMatch(release.Digest??"",@"^sha256:[a-fA-F0-9]{64}$") || release.Size<=0 || release.Size>64*1024*1024)throw new InvalidDataException("Релиз оболочки не прошёл проверку источника, размера или SHA-256.");
                 return release;
@@ -81,9 +82,11 @@ namespace ZapretDesktop {
                 if(!String.Equals("sha256:"+Updater.Hash(zip),release.Digest,StringComparison.OrdinalIgnoreCase))throw new InvalidDataException("SHA-256 оболочки не совпадает.");
                 string unpacked=Path.Combine(stage,"unpacked");await Task.Run(()=>Updater.Extract(zip,unpacked));
                 token.ThrowIfCancellationRequested();
-                string executable=Path.Combine(unpacked,"Obhod","Obhod.exe");ValidateBinary(executable,release.Version);
+                string executable=Path.Combine(unpacked,"ByPass","ByPass.exe");
+                if(!File.Exists(executable))executable=Path.Combine(unpacked,"Obhod","Obhod.exe");
+                ValidateBinary(executable,release.Version);
                 // Only the shell is replaced. All settings and engine versions remain in place.
-                string prepared=Path.Combine(stage,"Obhod.exe");File.Copy(executable,prepared);
+                string prepared=Path.Combine(stage,"ByPass.exe");File.Copy(executable,prepared);
                 File.Copy(executable+".config",prepared+".config");
                 File.WriteAllText(Path.Combine(stage,"verified.sha256"),Updater.Hash(prepared));
                 File.WriteAllText(Path.Combine(stage,"version.txt"),release.Version);
@@ -95,7 +98,7 @@ namespace ZapretDesktop {
         static string InstallationRoot(string prepared,string target) {
             string root=Path.GetFullPath(Path.Combine(Path.GetDirectoryName(prepared),"..","..",".."));
             target=Path.GetFullPath(target);
-            if(!String.Equals(Path.GetDirectoryName(target),root,StringComparison.OrdinalIgnoreCase) || !Path.GetFileName(target).StartsWith("Obhod",StringComparison.OrdinalIgnoreCase) || !Path.GetExtension(target).Equals(".exe",StringComparison.OrdinalIgnoreCase))throw new InvalidDataException("Неправильный путь установки приложения.");
+            if(!String.Equals(Path.GetDirectoryName(target),root,StringComparison.OrdinalIgnoreCase) || !Regex.IsMatch(Path.GetFileName(target),@"^(?:ByPass|Obhod)(?:-[0-9.]+)?\.exe$",RegexOptions.IgnoreCase))throw new InvalidDataException("Неправильный путь установки приложения.");
             return root;
         }
         static void ValidatePrepared(string source) {

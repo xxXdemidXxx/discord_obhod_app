@@ -9,7 +9,7 @@ using System.Windows.Forms;
 namespace ZapretDesktop {
     public static class AppShortcut {
         public static void Create() {
-            var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "Обход.lnk");
+            var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "ByPass.lnk");
             var shellType = Type.GetTypeFromProgID("WScript.Shell"); object shell = null, shortcut = null;
             try {
                 shell = Activator.CreateInstance(shellType);
@@ -17,12 +17,12 @@ namespace ZapretDesktop {
                 var type = shortcut.GetType();
                 if (File.Exists(path)) {
                     var target = Convert.ToString(type.InvokeMember("TargetPath", BindingFlags.GetProperty, null, shortcut, null));
-                    if (!String.Equals(target, Application.ExecutablePath, StringComparison.OrdinalIgnoreCase) && !(String.Equals(Path.GetDirectoryName(target), AppDomain.CurrentDomain.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase) && System.Text.RegularExpressions.Regex.IsMatch(Path.GetFileName(target),@"^Obhod(?:-[0-9.]+)?\.exe$"))) throw new IOException("На рабочем столе уже есть другой ярлык «Обход». Переименуйте его перед созданием нового.");
+                    if (!String.Equals(target, Application.ExecutablePath, StringComparison.OrdinalIgnoreCase) && !(String.Equals(Path.GetDirectoryName(target), AppDomain.CurrentDomain.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase) && System.Text.RegularExpressions.Regex.IsMatch(Path.GetFileName(target),@"^(?:ByPass|Obhod)(?:-[0-9.]+)?\.exe$"))) throw new IOException("На рабочем столе уже есть другой ярлык «ByPass». Переименуйте его перед созданием нового.");
                 }
                 type.InvokeMember("TargetPath", BindingFlags.SetProperty, null, shortcut, new object[] {Application.ExecutablePath});
                 type.InvokeMember("WorkingDirectory", BindingFlags.SetProperty, null, shortcut, new object[] {AppDomain.CurrentDomain.BaseDirectory});
                 type.InvokeMember("IconLocation", BindingFlags.SetProperty, null, shortcut, new object[] {Application.ExecutablePath + ",0"});
-                type.InvokeMember("Description", BindingFlags.SetProperty, null, shortcut, new object[] {"Обход для Discord и YouTube"});
+                type.InvokeMember("Description", BindingFlags.SetProperty, null, shortcut, new object[] {"ByPass — доступ к Discord и YouTube"});
                 type.InvokeMember("Save", BindingFlags.InvokeMethod, null, shortcut, null);
             } finally {
                 if (shortcut != null) Marshal.FinalReleaseComObject(shortcut);
@@ -51,7 +51,8 @@ namespace ZapretDesktop {
         public static void Allow(IntPtr handle) { ChangeWindowMessageFilterEx(handle, Message, 1, IntPtr.Zero); }
         public static void ShowExisting() {
             for (int attempt = 0; attempt < 10; attempt++) {
-                var handle = FindWindow(null, "Обход");
+                var handle = FindWindow(null, "ByPass");
+                if (handle == IntPtr.Zero) handle = FindWindow(null, "Обход");
                 bool legacy = handle == IntPtr.Zero;
                 if (legacy) handle = FindWindow(null, "Zapret Desktop");
                 if (handle != IntPtr.Zero) {

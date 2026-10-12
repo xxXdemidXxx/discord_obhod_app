@@ -170,13 +170,14 @@ namespace ZapretDesktop {
             }finally{Directory.Delete(folder,true);}
         }
         static async Task StageTests(string root){
+            foreach(string brand in new[]{"Obhod","ByPass"}) {
             string folder=Path.Combine(root,"tests","fixture-stage-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(folder);
             string archive=Path.Combine(folder,"source.zip");
             try{
                 using(var zip=ZipFile.Open(archive,ZipArchiveMode.Create)){
-                    zip.CreateEntryFromFile(Path.Combine(root,"tests","Obhod-probe.exe"),"Obhod/Obhod.exe");
-                    using(var text=new StreamWriter(zip.CreateEntry("Obhod/Obhod.exe.config").Open()))text.Write("<configuration/>");
-                    byte[] bytes=new byte[250000];new Random(42).NextBytes(bytes);using(var stream=zip.CreateEntry("Obhod/unused.bin").Open())stream.Write(bytes,0,bytes.Length);
+                    zip.CreateEntryFromFile(Path.Combine(root,"tests","Obhod-probe.exe"),brand+"/"+brand+".exe");
+                    using(var text=new StreamWriter(zip.CreateEntry(brand+"/"+brand+".exe.config").Open()))text.Write("<configuration/>");
+                    byte[] bytes=new byte[250000];new Random(42).NextBytes(bytes);using(var stream=zip.CreateEntry(brand+"/unused.bin").Open())stream.Write(bytes,0,bytes.Length);
                 }
                 byte[] content=File.ReadAllBytes(archive);
                 var release=new Release{Version=ShellUpdates.Current,Url="https://github.com/test/archive.zip",Size=content.Length,Digest="sha256:"+Updater.Hash(archive)};
@@ -197,10 +198,11 @@ namespace ZapretDesktop {
                         Assert(cancelled && Directory.GetDirectories(Path.Combine(folder,"data","app-updates")).Length==stages,"Cancellation during download removes the incomplete stage");
                     }
                     File.AppendAllText(prepared,"tampered");
-                    bool refused=false;try{await ShellUpdates.Launch(prepared,Path.Combine(folder,"Obhod.exe"),false);}catch(InvalidDataException){refused=true;}
+                    bool refused=false;try{await ShellUpdates.Launch(prepared,Path.Combine(folder,brand+".exe"),false);}catch(InvalidDataException){refused=true;}
                     Assert(refused,"Changed prepared binary is rejected before starting a helper or stopping the application");
                 }
             }finally{Directory.Delete(folder,true);}
+            }
         }
         static void Pump(Task task){
             var watch=Stopwatch.StartNew();while(!task.IsCompleted && watch.ElapsedMilliseconds<15000){Application.DoEvents();Thread.Sleep(10);}Assert(task.IsCompleted,"Update action finishes without a modal dialog");task.GetAwaiter().GetResult();Application.DoEvents();
@@ -209,12 +211,28 @@ namespace ZapretDesktop {
         static void Capture(Form form,string path){form.PerformLayout();Application.DoEvents();using(var image=new Bitmap(form.Width,form.Height)){form.DrawToBitmap(image,new Rectangle(Point.Empty,form.Size));image.Save(path);}}
         static void AppUpdateUiTests(Store store,string root){
             var http=new MockHttp{Reply=url=>Response(200,Feed("99.0.0"))};
-            using(var form=new MainForm(store,false,false,false,false,new ShellUpdates(http))){
+            bool accept=false;int confirmations=0;
+            using(var form=new MainForm(store,false,false,false,false,new ShellUpdates(http),(title,message)=>{confirmations++;return accept;})){
                 form.StartPosition=FormStartPosition.Manual;form.Location=new Point(-2500,-2500);form.Show();Application.DoEvents();SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());var tabs=FindTabs(form);tabs.SelectedIndex=2;
                 var card=AllControls(form).OfType<AppUpdateCard>().Single();
                 Assert(card.Action.Text=="Проверить обновления" && card.Action.Enabled && AllControls(card).OfType<Button>().Count(x=>x.Visible)==1,"Updates view starts with exactly one visible action");
                 Capture(form,Path.Combine(root,"tests","window-updates-idle.png"));
                 Pump(UpdateClick(form));Assert(card.Action.Text=="Обновить" && http.Calls==1,"Native update button changes to install without downloading");
+                Assert(form.Text=="ByPass" && AllControls(form).OfType<UpdateNotice>().Single().Visible && confirmations==0,"ByPass shows a quiet update notice without an automatic confirmation dialog");
+                Pump(UpdateClick(form));Assert(confirmations==1 && http.Calls==1 && card.Action.Text=="Обновить","Declining the update makes no download request and keeps the available version");
+                var flags=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic;
+                var coreField=typeof(MainForm).GetField("release",flags);coreField.SetValue(form,new Release{Version="99.0.0"});
+                typeof(MainForm).GetMethod("RefreshState",flags).Invoke(form,null);
+                Assert(AllControls(form).OfType<Label>().Any(x=>x.Visible && x.Text.StartsWith("Доступна новая версия ядра")),"Core update notice is visible beside the shell notice on any tab");
+                if(!((EngineRunner)typeof(MainForm).GetField("runner",flags).GetValue(form)).Conflict){
+                    Pump((Task)typeof(MainForm).GetMethod("Install",flags).Invoke(form,null));
+                    Assert(confirmations==2 && coreField.GetValue(form)!=null,"Declining a core update keeps its candidate without starting installation");
+                }
+                Capture(form,Path.Combine(root,"tests","window-update-notices.png"));
+                foreach(var dismiss in AllControls(form).OfType<UpdateNotice>().Single().Controls.Cast<Control>().SelectMany(x=>AllControls(x)).OfType<Button>().Where(x=>x.Text=="×").ToArray())dismiss.PerformClick();
+                Assert(!AllControls(form).OfType<UpdateNotice>().Single().Visible && card.Action.Text=="Обновить","Notices can be dismissed while updating stays available in its tab");
+                coreField.SetValue(form,null);typeof(MainForm).GetMethod("RefreshState",flags).Invoke(form,null);
+                accept=true;
                 Capture(form,Path.Combine(root,"tests","window-updates-available.png"));
                 http.AsyncReply=async(url,token)=>{await Task.Delay(1000,token);return Response(200,new string('x',123));};
                 var pending=UpdateClick(form);Application.DoEvents();
@@ -303,10 +321,11 @@ namespace ZapretDesktop {
             }
         }
         static void ShellReplacementTest(string root) {
+            foreach(string brand in new[]{"Obhod","ByPass"}) {
             var folder=Path.Combine(root,"tests","fixture-update-"+Guid.NewGuid().ToString("N"));
             var stage=Path.Combine(folder,"data","app-updates","probe");Directory.CreateDirectory(stage);
             try {
-                var source=Path.Combine(stage,"Obhod.exe");var target=Path.Combine(folder,"Obhod.exe");
+                var source=Path.Combine(stage,"ByPass.exe");var target=Path.Combine(folder,brand+".exe");
                 File.Copy(Path.Combine(root,"tests","Obhod-probe.exe"),source);
                 File.WriteAllText(source+".config","<?xml version=\"1.0\"?><configuration><startup><supportedRuntime version=\"v4.0\"/></startup></configuration>");
                 File.WriteAllText(Path.Combine(stage,"verified.sha256"),Updater.Hash(source));File.WriteAllText(Path.Combine(stage,"config.sha256"),Updater.Hash(source+".config"));
@@ -323,6 +342,7 @@ namespace ZapretDesktop {
                 Assert(File.ReadAllText(target+".previous")=="previous executable" && File.ReadAllText(target+".config.previous")=="previous config","Old executable and configuration backed up");
                 Assert(File.ReadAllText(settings)=="preserved settings","Shell update does not overwrite user settings");
             } finally {Directory.Delete(folder,true);}
+            }
         }
         static void ShellHandshakeTest(string root){
             string folder=Path.Combine(root,"tests","fixture-handshake-"+Guid.NewGuid().ToString("N")),stage=Path.Combine(folder,"data","app-updates","probe");Directory.CreateDirectory(stage);
@@ -388,6 +408,10 @@ namespace ZapretDesktop {
             string next="99.0.0";
             string json="{\"tag_name\":\"v"+next+"\",\"draft\":false,\"prerelease\":false,\"assets\":[{\"name\":\"Obhod-"+next+"-win-x64.zip\",\"browser_download_url\":\"https://github.com/"+ShellUpdates.Repository+"/releases/download/v"+next+"/Obhod-"+next+"-win-x64.zip\",\"digest\":\"sha256:"+new string('a',64)+"\",\"size\":100}]}";
             Assert(ShellUpdates.Parse(json).Version==next,"Stable newer shell release accepted");
+            string stable=json.Replace("Obhod-"+next+"-win-x64.zip","ByPass-win-x64.zip");
+            Assert(ShellUpdates.Parse(stable).Version==next,"Permanent download filename accepted for shell updates");
+            Reject(()=>ShellUpdates.Parse(stable.Replace("/download/v"+next+"/","/download/v0.0.1/")),"Permanent filename must still belong to the declared release tag");
+            Reject(()=>ShellUpdates.Parse(stable.Replace("https://github.com/","https://example.com/")),"Foreign permanent download URL rejected");
             Reject(()=>ShellUpdates.Parse(json.Replace("sha256:","sha512:")),"Missing or wrong digest prevents shell update");
             Reject(()=>ShellUpdates.Parse(json.Replace("https://github.com/","https://example.com/")),"Foreign update URL rejected");
             Assert(ShellUpdates.Parse(json.Replace("\"prerelease\":false","\"prerelease\":true"))==null,"Prerelease excluded from automatic updates");

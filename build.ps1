@@ -14,4 +14,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
 <?xml version="1.0"?>
 <configuration><startup><supportedRuntime version="v4.0" sku=".NETFramework,Version=v4.8" /></startup></configuration>
 '@ | Set-Content -LiteralPath (Join-Path $dist "$exe.config") -Encoding UTF8
-Write-Output "Built: $dist\$exe"
+# Retain the assembly name accepted by installed Obhod updaters, while the
+# user-facing executable and Windows product information use ByPass.
+Copy-Item -LiteralPath (Join-Path $dist $exe) -Destination (Join-Path $dist "ByPass-$version.exe") -Force
+Copy-Item -LiteralPath (Join-Path $dist "$exe.config") -Destination (Join-Path $dist "ByPass-$version.exe.config") -Force
+Write-Output "Built: $dist\ByPass-$version.exe"

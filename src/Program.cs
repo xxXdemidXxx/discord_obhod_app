@@ -22,7 +22,7 @@ namespace ZapretDesktop {
                     try { if (!mutex.WaitOne(10000)) return; } catch (AbandonedMutexException) { }
                 }
                 try { Application.Run(new MainForm(new Store(AppDomain.CurrentDomain.BaseDirectory), args.Contains("--connect"), args.Contains("--autoselect"), args.Contains("--restore-connect"), args.Contains("--full-scan"))); }
-                catch (Exception ex) { MessageBox.Show(ex.Message, "Не удалось запустить Обход", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+                catch (Exception ex) { MessageBox.Show(ex.Message, "Не удалось запустить ByPass", MessageBoxButtons.OK, MessageBoxIcon.Error); }
                 finally { mutex.ReleaseMutex(); }
             }
         }
@@ -41,17 +41,20 @@ namespace ZapretDesktop {
         string activeStrategy,scanStep=""; int checkEpoch; Task manualCheckTask;
         CancellationTokenSource scanCancellation;
         readonly AppUpdateSession appUpdates;
+        readonly Func<string,string,bool> confirmUpdate;
+        UpdateNotice updateNotice;
         AppUpdateCard appUpdateCard; Button coreManual; CheckBox autoShell; bool updateOutcome;
         bool previouslyOn;
         CancellationTokenSource checkCancellation; bool testing, checkingUpdates;
         NotifyIcon tray; System.Windows.Forms.Timer timer;
         Release release; bool busy, exiting, loading, elevation;
-        public MainForm(Store store, bool start, bool auto = false, bool restoreConnection = false, bool fullScan = false, ShellUpdates shellUpdates = null) {
+        public MainForm(Store store, bool start, bool auto = false, bool restoreConnection = false, bool fullScan = false, ShellUpdates shellUpdates = null, Func<string,string,bool> updateConfirmation = null) {
             this.store = store; updater = new Updater(store);appUpdates=new AppUpdateSession(shellUpdates??new ShellUpdates());
+            confirmUpdate=updateConfirmation??((title,message)=>MessageBox.Show(this,message,title,MessageBoxButtons.YesNo,MessageBoxIcon.Question,MessageBoxDefaultButton.Button2)==DialogResult.Yes);
             activeStrategy = store.Settings.Strategy;
             BuildInterface();
             if(fullScan)dashboard.ScanMode.SelectedIndex=1;
-            tray = new NotifyIcon { Icon = Icon, Text = "Обход — выключен", Visible = true };
+            tray = new NotifyIcon { Icon = Icon, Text = "ByPass — выключен", Visible = true };
             var menu = new ContextMenuStrip(); menu.Items.Add("Открыть", null, (s,e) => Restore()); menu.Items.Add("Включить / выключить", null, async (s,e) => await Toggle()); menu.Items.Add("Выход", null, (s,e) => Exit()); tray.ContextMenuStrip = menu; tray.DoubleClick += (s,e) => Restore();
             runner.Log += Append; timer = new System.Windows.Forms.Timer { Interval = 800 };
             timer.Tick += (s,e) => RefreshState();timer.Start();
@@ -59,7 +62,7 @@ namespace ZapretDesktop {
             LoadSettings();
             var outcome=ShellUpdates.TakeOutcome(store.Root);updateOutcome=outcome!=null;
             if(outcome!=null){if(outcome.Success && outcome.Version==ShellUpdates.Current)appUpdates.Complete();else {appUpdates.Fail("Обновление не установлено. Текущая версия сохранена.");Append("Установка обновления: "+outcome.Error);}tabs.SelectedIndex=2;}
-            Shown += async (s,e) => {Append("Обход "+ShellUpdates.Current+". Ядро "+Updater.Version(store.Current));if(auto)await AutoSelect(restoreConnection);else if(start)await ApplyStrategy();if(!IsDisposed && store.Settings.AutoAppUpdates && !updateOutcome)await CheckShell(true);if(!IsDisposed && store.Settings.CheckUpdates)await CheckUpdates(true);};
+            Shown += async (s,e) => {Append("ByPass "+ShellUpdates.Current+". Ядро "+Updater.Version(store.Current));if(auto)await AutoSelect(restoreConnection);else if(start)await ApplyStrategy();if(!IsDisposed && store.Settings.AutoAppUpdates && !updateOutcome)await CheckShell(true);if(!IsDisposed && store.Settings.CheckUpdates)await CheckUpdates(true);};
             FormClosing += (s,e) => { if (!exiting && e.CloseReason==CloseReason.UserClosing) { e.Cancel = true; Hide(); } };
         }
         Label Label(string text, float size, Color color, int x, int y, int width, int height) {
@@ -72,7 +75,7 @@ namespace ZapretDesktop {
         Panel Page(string text) { return new Panel { Text = text, BackColor = background, ForeColor = Color.White, AutoScroll = false, Padding = new Padding(Px(24)) }; }
         TextBox Input(int x, int y, int width) { return new TextBox { Location = new Point(x,y), Size = new Size(width,32), BackColor = card, ForeColor = Color.White, BorderStyle = BorderStyle.FixedSingle }; }
         void Guard(Action action) { try { action(); } catch (Exception ex) { Error(ex); } }
-        void Error(Exception ex) { Append("Ошибка: " + ex.Message); MessageBox.Show(this, ex.Message, "Обход", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
+        void Error(Exception ex) { Append("Ошибка: " + ex.Message); MessageBox.Show(this, ex.Message, "ByPass", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
         public void Append(string line) {
             if (IsDisposed || Disposing) return;
             if (InvokeRequired) { try { BeginInvoke(new Action<string>(Append), line); } catch (InvalidOperationException) {} return; }
@@ -237,6 +240,7 @@ namespace ZapretDesktop {
         async Task Install() {
             if (busy || scanning || starting || domainEditor.Dirty || release == null) return;
             if (runner.Running || runner.Conflict) { Error(new InvalidOperationException("Сначала остановите все процессы winws.")); return; }
+            if(!confirmUpdate("Обновление ядра","Установить новую версию ядра "+release.Version+"?\n\nВаши настройки и списки сохранятся. Предыдущую версию можно будет вернуть."))return;
             busy = true; RefreshState();
             try { await StopChecks(); InvalidateChecks("Ядро обновлено · запустите проверку заново"); await updater.Install(release, message => {updateText.Text = message; Append(message);}); release = null; LoadSettings(); }
             catch (Exception ex) { updateText.Text = "Обновление не установлено. Текущее ядро сохранено."; Error(ex); }
@@ -261,8 +265,9 @@ namespace ZapretDesktop {
             autoCheck.Enabled = !busy && !checkingUpdates; runChecks.Enabled = !busy && !starting && !scanning && !testing;
             appUpdateCard.Action.Enabled = !appUpdates.Working && !busy && !starting && !scanning && !dnsBusy && (appUpdates.Release==null || !domainEditor.Dirty) && !elevation;
             appUpdateCard.Render(appUpdates,appUpdates.Release!=null && domainEditor.Dirty && !appUpdates.Working?"Сохраните изменения в «Дополнительно», чтобы обновиться.":null);
+            updateNotice.Render(appUpdates.Release==null?null:appUpdates.Release.Version,release==null?null:release.Version,appUpdateCard.Action.Enabled,install.Enabled,on || external);
             autoShell.Enabled = !appUpdates.Working && !busy;coreManual.Visible=expandedCore && coreManual.Tag!=null;
-            tray.Text = "Обход — " + (on ? "включён" : "выключен");
+            tray.Text = "ByPass — " + (on ? "включён" : "выключен");
         }
         void AppUpdateChanged() {
             if(IsDisposed || Disposing)return;
@@ -277,6 +282,8 @@ namespace ZapretDesktop {
         }
         async Task AppUpdateAction() {
             if(appUpdates.Release==null){await CheckShell(false);return;}
+            if(busy || starting || scanning || dnsBusy || appUpdates.Working || domainEditor.Dirty)return;
+            if(!confirmUpdate("Обновление ByPass","Обновить оболочку до версии "+appUpdates.Release.Version+"?\n\nПриложение перезапустится. Ваши настройки и списки сохранятся."))return;
             await ApplyShell();
         }
         async Task ApplyShell() {

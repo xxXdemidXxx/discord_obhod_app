@@ -23,7 +23,7 @@ namespace ZapretDesktop {
             this.store = store;
             ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
             client = new HttpClient { Timeout = TimeSpan.FromMinutes(3) };
-            client.DefaultRequestHeaders.UserAgent.ParseAdd("Obhod/"+ShellUpdates.Current);
+            client.DefaultRequestHeaders.UserAgent.ParseAdd("ByPass/"+ShellUpdates.Current);
             client.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
         }
         public async Task<Release> Check() {

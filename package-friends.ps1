@@ -35,7 +35,18 @@ $zip = Join-Path $releaseDir "Obhod-$version-win-x64.zip"
 Compress-Archive -LiteralPath $appDir -DestinationPath $zip -Force
 $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
 Set-Content -LiteralPath ($zip + '.sha256.txt') -Value "$hash  Obhod-$version-win-x64.zip" -Encoding ASCII
-Write-Output "For friends: $zip"
+# Old updaters require both the Obhod asset name and Obhod/Obhod.exe layout.
+# New users receive the same runtime with ByPass folder and executable names.
+$brandDir = Join-Path $stage 'ByPass'
+Copy-Item -LiteralPath $appDir -Destination $brandDir -Recurse
+Rename-Item -LiteralPath (Join-Path $brandDir 'Obhod.exe') -NewName 'ByPass.exe'
+Rename-Item -LiteralPath (Join-Path $brandDir 'Obhod.exe.config') -NewName 'ByPass.exe.config'
+$download = Join-Path $releaseDir 'ByPass-win-x64.zip'
+Compress-Archive -LiteralPath $brandDir -DestinationPath $download -Force
+$downloadHash = (Get-FileHash -LiteralPath $download -Algorithm SHA256).Hash.ToLowerInvariant()
+Set-Content -LiteralPath ($download + '.sha256.txt') -Value "$downloadHash  ByPass-win-x64.zip" -Encoding ASCII
+Write-Output "Download: $download"
+Write-Output "Compatible update archive: $zip"
 Write-Output "SHA-256: $hash"
 $metadata = @{
     tag_name="v$version";draft=$false;prerelease=$false

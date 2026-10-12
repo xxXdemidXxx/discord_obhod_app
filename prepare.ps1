@@ -33,5 +33,5 @@ if (-not (Test-Path -LiteralPath $settings)) {
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'README.md') -Destination $dist -Force
 if (-not (Test-Path -LiteralPath (Join-Path $dist 'licenses'))) { New-Item -ItemType Directory -Path (Join-Path $dist 'licenses') | Out-Null }
 Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'licenses') -File | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $dist 'licenses') -Force }
-Write-Output "Ready: $dist (versioned Obhod EXE)"
+Write-Output "Ready: $dist (versioned ByPass EXE)"
 

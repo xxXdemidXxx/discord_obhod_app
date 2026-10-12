@@ -30,7 +30,7 @@ namespace ZapretDesktop {
             var watch = Stopwatch.StartNew();
             using (var handler = new HttpClientHandler { UseProxy = false, AllowAutoRedirect = true })
             using (var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(timeoutSeconds) }) {
-                client.DefaultRequestHeaders.UserAgent.ParseAdd("Obhod/"+ShellUpdates.Current);
+                client.DefaultRequestHeaders.UserAgent.ParseAdd("ByPass/"+ShellUpdates.Current);
                 try {
                     using (var response = await client.GetAsync(target.Url, HttpCompletionOption.ResponseHeadersRead, token)) {
                         return new CheckResult { State = response.IsSuccessStatusCode ? 1 : 2,
