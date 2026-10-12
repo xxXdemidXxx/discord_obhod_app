@@ -13,10 +13,23 @@ namespace ZapretDesktop {
     public sealed class EngineRunner : IDisposable {
         NamedPipeServerStream pipe;Task reader;string helperHash;Timer observer;
         readonly object gate=new object();readonly AutoResetEvent response=new AutoResetEvent(false);
-        Dictionary<string,object> reply;volatile bool running,connected;Exception failure;
+        Dictionary<string,object> reply;volatile bool running,connected,ready;Exception failure;
         public event Action<string> Log;
         public bool Running {get{return running;}}
-        public bool Conflict {get{if(running)return false;var processes=Process.GetProcessesByName("winws");bool found=processes.Length>0;foreach(var process in processes)process.Dispose();return found;}}
+        public bool Ready {get{return running && ready;}}
+#if TESTING
+        internal Func<bool> ConflictCheck=null;
+#endif
+        public bool Conflict {
+            get {
+#if TESTING
+                if(ConflictCheck!=null)return ConflictCheck();
+#endif
+                if(running)return false;
+                var processes=Process.GetProcessesByName("winws");bool found=processes.Length>0;
+                foreach(var process in processes)process.Dispose();return found;
+            }
+        }
         void Connect() {
             if(connected)return;
             if(pipe!=null)pipe.Dispose();
@@ -48,7 +61,7 @@ namespace ZapretDesktop {
                         if(!String.Equals(actual,expected,StringComparison.OrdinalIgnoreCase) || Trust.Hash(actual)!=helperHash)throw new InvalidDataException("Неизвестный компонент запуска.");
                     }
                     connected=true;failure=null;
-                    reader=Task.Run(()=>{try{while(connected){var message=HostWire.Read(pipe);string type=(string)message["type"];if(type=="reply"){reply=message;response.Set();}else if(type=="log" && Log!=null)Log((string)message["text"]);}}catch(Exception ex){failure=ex;connected=false;running=false;response.Set();}});
+                    reader=Task.Run(()=>{try{while(connected){var message=HostWire.Read(pipe);string type=(string)message["type"];if(type=="reply"){reply=message;response.Set();}else if(type=="log"){string line=(string)message["text"];if(line.Contains("windivert initialized. capture is started."))ready=true;if(Log!=null)Log(line);}}}catch(Exception ex){failure=ex;connected=false;running=false;response.Set();}});
                     if(observer==null)observer=new Timer(_=>{if(!Monitor.TryEnter(gate))return;try{if(connected)Ask("status",null,null);}catch{running=false;}finally{Monitor.Exit(gate);}},null,800,800);
                 }
             }catch{connected=false;pipe.Dispose();pipe=null;throw;}
@@ -60,12 +73,13 @@ namespace ZapretDesktop {
                 HostWire.Write(pipe,new{action=action,engine=engine,strategy=strategy});
                 if(!response.WaitOne(15000)){connected=false;pipe.Dispose();running=false;throw new IOException("Компонент запуска не ответил.");}
                 if(reply==null)throw new IOException("Связь с компонентом запуска прервана.",failure);
-                running=Convert.ToBoolean(reply["running"]);string error=(string)reply["error"];
+                running=Convert.ToBoolean(reply["running"]);if(!running)ready=false;string error=(string)reply["error"];
                 if(error.Length>0){object kind;if(reply.TryGetValue("error_kind",out kind) && (string)kind=="setup")throw new EngineSetupException("Не удалось подготовить ядро.\n"+error);throw new EngineStartException(error);}
             }
         }
         public void Start(string engine,string strategy) {
             lock(gate) {
+            ready=false;
             try {
                 Trust.VerifyEngine(engine);
                 if(!String.Equals(Path.GetDirectoryName(Path.GetFullPath(engine)),Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"data","engines").TrimEnd('\\'),StringComparison.OrdinalIgnoreCase))throw new InvalidDataException("Ядро должно находиться в папке приложения.");
@@ -74,7 +88,17 @@ namespace ZapretDesktop {
             try{Ask("start",Path.GetFileName(engine),strategy);}catch(IOException ex){throw new EngineSetupException("Не удалось связаться с компонентом запуска. Повторите запуск ByPass.\n"+ex.Message,ex);}
             }
         }
-        public void Stop(){if(connected)Ask("stop",null,null);running=false;}
+        public void Stop(){ready=false;if(connected)Ask("stop",null,null);running=false;}
+        internal static async Task WaitForReady(Func<bool> running,Func<bool> ready,CancellationToken token,int timeoutMilliseconds=10000) {
+            var watch=Stopwatch.StartNew();
+            while(true) {
+                token.ThrowIfCancellationRequested();
+                if(!running())throw new EngineStartException("Ядро завершилось до начала перехвата. Подробности в журнале.");
+                if(ready())return;
+                if(watch.ElapsedMilliseconds>=timeoutMilliseconds)throw new EngineStartException("Ядро не подтвердило начало перехвата за 10 секунд. Подробности в журнале.");
+                await Task.Delay(100,token);
+            }
+        }
         public void Dispose(){if(observer!=null)observer.Dispose();lock(gate){try{if(connected)Ask("shutdown",null,null);}catch{}connected=false;if(pipe!=null)pipe.Dispose();if(reader!=null)try{reader.Wait(2000);}catch{}}response.Dispose();}
     }
 }

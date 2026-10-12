@@ -1,20 +1,29 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Net;
 using System.Net.Sockets;
+using System.Net.WebSockets;
 using System.Security.Authentication;
 using System.Linq;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Web.Script.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 
 namespace ZapretDesktop {
+    public enum ProbeKind { Http, DiscordApp, DiscordGateway, DiscordUpdates }
     public sealed class ServiceTarget {
         public string Name, Url;
-        public ServiceTarget(string name, string url) { Name = name; Url = url; }
+        public readonly ProbeKind Kind;
+        public ServiceTarget(string name, string url, ProbeKind kind = ProbeKind.Http) { Name = name; Url = url; Kind = kind; }
     }
     public sealed class CheckResult {
-        public int State; // 0: unavailable; 1: successful HTTP response; 2: server replied with an error
+        public int State; // 0: unavailable; 1: probe passed; 2: unexpected server response
         public string Detail; public long Milliseconds;
         public string Failure = "";
     }
@@ -22,26 +31,173 @@ namespace ZapretDesktop {
         public static readonly ServiceTarget[] Targets = {
             new ServiceTarget("YouTube · сайт", "https://www.youtube.com/"),
             new ServiceTarget("YouTube · изображения", "https://i.ytimg.com/vi/jNQXAC9IVRw/hqdefault.jpg"),
-            new ServiceTarget("Discord · сайт", "https://discord.com/"),
-            new ServiceTarget("Discord · API", "https://discord.com/api/v10/gateway"),
+            new ServiceTarget("Discord · приложение", "https://discord.com/app", ProbeKind.DiscordApp),
+            new ServiceTarget("Discord · Gateway", "https://discord.com/api/v10/gateway", ProbeKind.DiscordGateway),
+            new ServiceTarget("Discord · обновления", "https://updates.discord.com/distributions/app/manifests/latest?platform=win&channel=stable&arch=x64", ProbeKind.DiscordUpdates),
             new ServiceTarget("GitHub · обновления", "https://github.com/xxXdemidXxx/discord_obhod_app/releases/latest")
         };
-        public static async Task<CheckResult> Run(ServiceTarget target, CancellationToken token, int timeoutSeconds = 12) {
-            var watch = Stopwatch.StartNew();
-            using (var handler = new HttpClientHandler { UseProxy = false, AllowAutoRedirect = true })
-            using (var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(timeoutSeconds) }) {
-                client.DefaultRequestHeaders.UserAgent.ParseAdd("ByPass/"+ShellUpdates.Current);
+        public static Task<CheckResult> Run(ServiceTarget target, CancellationToken token, int timeoutSeconds = 12) {
+            return Run(target, token, timeoutSeconds, new HttpClientHandler {
+                UseProxy = false, AllowAutoRedirect = false, AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate
+            }, CheckGateway);
+        }
+        // Inject transports for offline tests; never use a live VPN connection to validate a strategy.
+        internal static async Task<CheckResult> Run(ServiceTarget target, CancellationToken token, int timeoutSeconds,
+            HttpMessageHandler handler, Func<Uri,CancellationToken,Task> gateway) {
+            var watch = Stopwatch.StartNew(); string stage = target.Url;
+            using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(token))
+            using (var client = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan }) {
+                deadline.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds)); var cancel = deadline.Token;
+                client.DefaultRequestHeaders.UserAgent.ParseAdd("ByPass/" + ShellUpdates.Current);
+                client.DefaultRequestHeaders.ConnectionClose = true;
+                client.DefaultRequestHeaders.CacheControl = new CacheControlHeaderValue { NoCache = true, NoStore = true };
                 try {
-                    using (var response = await client.GetAsync(target.Url, HttpCompletionOption.ResponseHeadersRead, token)) {
-                        return new CheckResult { State = response.IsSuccessStatusCode ? 1 : 2,
-                            Detail = response.IsSuccessStatusCode ? "Доступен · HTTP " + (int)response.StatusCode : "Ответ сервера · HTTP " + (int)response.StatusCode,
-                            Milliseconds = watch.ElapsedMilliseconds };
+                    using (var response = await Get(client, new Uri(target.Url), cancel, target.Kind != ProbeKind.Http)) {
+                        if (!response.IsSuccessStatusCode) return HttpError(response, watch.ElapsedMilliseconds, stage);
+                        string detail;
+                        if (target.Kind == ProbeKind.DiscordGateway) {
+                            var json = Parse(await ReadText(response, 64 * 1024, cancel)); object value;
+                            Uri url;
+                            if (!json.TryGetValue("url", out value) || !Uri.TryCreate(value as string, UriKind.Absolute, out url) ||
+                                url.Scheme != "wss" || url.Host != "gateway.discord.gg" || !url.IsDefaultPort || url.UserInfo.Length != 0)
+                                throw new InvalidDataException("API не вернул адрес Gateway Discord");
+                            url = new UriBuilder(url) { Query = "v=10&encoding=json" }.Uri;
+                            stage = url.ToString(); await gateway(url, cancel);
+                            detail = "API + WebSocket · Hello и ответ на heartbeat получены";
+                        } else if (target.Kind == ProbeKind.DiscordUpdates) {
+                            var json = Parse(await ReadText(response, 512 * 1024, cancel)); object value;
+                            var full = json.TryGetValue("full", out value) ? value as Dictionary<string,object> : null;
+                            Uri download;
+                            if (full == null || !full.TryGetValue("url", out value) || !Uri.TryCreate(value as string, UriKind.Absolute, out download) || !DiscordUrl(download))
+                                throw new InvalidDataException("Сервер обновлений не вернул адрес файла Discord");
+                            stage = download.GetLeftPart(UriPartial.Path);
+                            using (var file = await Get(client, download, cancel, true, true)) {
+                                if (!file.IsSuccessStatusCode) return HttpError(file, watch.ElapsedMilliseconds, stage);
+                                var range = file.Content.Headers.ContentRange;
+                                if (file.StatusCode == HttpStatusCode.PartialContent && (range == null || range.Unit != "bytes" || range.From != 0 || range.To != 1023))
+                                    throw new InvalidDataException("Неверный диапазон файла обновления");
+                                string type = file.Content.Headers.ContentType == null ? "" : file.Content.Headers.ContentType.MediaType;
+                                if (type.StartsWith("text/", StringComparison.OrdinalIgnoreCase) || type.IndexOf("json", StringComparison.OrdinalIgnoreCase) >= 0)
+                                    throw new InvalidDataException("Вместо файла обновления получена страница или JSON");
+                                var sample = await ReadBody(file, 1024, cancel, true);
+                                if (sample.Length != 1024 || sample[0] == (byte)'<') throw new InvalidDataException("Не удалось прочитать начало файла обновления");
+                            }
+                            detail = "Манифест x64 + CDN · прочитано 1024 байта обновления";
+                        } else if (target.Kind == ProbeKind.DiscordApp) {
+                            string html = await ReadText(response, 4 * 1024 * 1024, cancel);
+                            if (!Regex.IsMatch(html, @"id\s*=\s*[""']app-mount[""']", RegexOptions.IgnoreCase))
+                                throw new InvalidDataException("Получена страница без приложения Discord");
+                            var scripts = Regex.Matches(html, @"<script\b[^>]*\bsrc\s*=\s*[""']([^""']+)[""']", RegexOptions.IgnoreCase)
+                                .Cast<Match>().Select(x => new Uri(new Uri(target.Url), WebUtility.HtmlDecode(x.Groups[1].Value))).Where(x => x.AbsolutePath.EndsWith(".js", StringComparison.OrdinalIgnoreCase)).ToArray();
+                            if (scripts.Length == 0) throw new InvalidDataException("В странице нет загрузочных скриптов Discord");
+                            // Sample the first and last bootstrap scripts; this is not a full logged-in client test.
+                            foreach (var script in new[] { scripts.First(), scripts.Last() }.Distinct()) {
+                                if (!DiscordUrl(script)) throw new InvalidDataException("Неизвестный адрес скрипта Discord");
+                                stage = script.GetLeftPart(UriPartial.Path);
+                                using (var asset = await Get(client, script, cancel, true)) {
+                                    if (!asset.IsSuccessStatusCode) return HttpError(asset, watch.ElapsedMilliseconds, stage);
+                                    string body = await ReadText(asset, 16 * 1024 * 1024, cancel);
+                                    if (String.IsNullOrWhiteSpace(body) || body.TrimStart().StartsWith("<")) throw new InvalidDataException("Вместо скрипта Discord получена пустая страница или HTML");
+                                }
+                            }
+                            detail = "HTML приложения + выборочная загрузка JS";
+                        } else detail = "Доступен · HTTP " + (int)response.StatusCode;
+                        return new CheckResult { State = 1, Detail = detail, Milliseconds = watch.ElapsedMilliseconds };
                     }
                 } catch (OperationCanceledException) {
-                    return new CheckResult { State = 0, Detail = token.IsCancellationRequested ? "Отменено" : "Тайм-аут · "+timeoutSeconds+" секунд", Failure = token.IsCancellationRequested ? "cancelled" : "timeout", Milliseconds = watch.ElapsedMilliseconds };
-                } catch (HttpRequestException ex) {
-                    return FromException(ex, watch.ElapsedMilliseconds);
+                    return new CheckResult { State = 0, Detail = (token.IsCancellationRequested ? "Отменено" : "Тайм-аут · " + timeoutSeconds + " секунд") + " | " + stage,
+                        Failure = token.IsCancellationRequested ? "cancelled" : "timeout", Milliseconds = watch.ElapsedMilliseconds };
+                } catch (UriFormatException ex) {
+                    return new CheckResult { State = 2, Detail = "Некорректный адрес | " + stage + " | " + ex.Message, Failure = "response", Milliseconds = watch.ElapsedMilliseconds };
+                } catch (InvalidDataException ex) {
+                    return new CheckResult { State = 2, Detail = "Неожиданный ответ | " + stage + " | " + ex.Message, Failure = "response", Milliseconds = watch.ElapsedMilliseconds };
+                } catch (Exception ex) {
+                    if (!((ex is ObjectDisposedException && deadline.IsCancellationRequested) || ex is HttpRequestException || ex is WebSocketException || ex is IOException || ex is WebException || ex is SocketException || ex is AuthenticationException)) throw;
+                    if (deadline.IsCancellationRequested) return new CheckResult { State = 0, Failure = token.IsCancellationRequested ? "cancelled" : "timeout", Detail = (token.IsCancellationRequested ? "Отменено" : "Тайм-аут · " + timeoutSeconds + " секунд") + " | " + stage, Milliseconds = watch.ElapsedMilliseconds };
+                    var result = FromException(ex, watch.ElapsedMilliseconds); result.Detail += " | " + stage; return result;
                 }
+            }
+        }
+        static CheckResult HttpError(HttpResponseMessage response, long elapsed, string stage) {
+            return new CheckResult { State = 2, Detail = "Ответ сервера · HTTP " + (int)response.StatusCode + " | " + stage, Failure = "http", Milliseconds = elapsed };
+        }
+        static bool DiscordUrl(Uri url) {
+            return url.Scheme == "https" && url.IsDefaultPort && url.UserInfo.Length == 0 &&
+                (url.Host == "discord.com" || url.Host.EndsWith(".discord.com", StringComparison.OrdinalIgnoreCase) ||
+                 url.Host == "discordapp.net" || url.Host.EndsWith(".discordapp.net", StringComparison.OrdinalIgnoreCase) ||
+                 url.Host == "discordapp.com" || url.Host.EndsWith(".discordapp.com", StringComparison.OrdinalIgnoreCase));
+        }
+        static async Task<HttpResponseMessage> Get(HttpClient client, Uri url, CancellationToken token, bool discord, bool range = false) {
+            for (int redirects = 0; ; redirects++) {
+                if (discord && !DiscordUrl(url)) throw new InvalidDataException("Перенаправление за пределы серверов Discord");
+                using (var request = new HttpRequestMessage(HttpMethod.Get, url)) {
+                    if (range) request.Headers.Range = new RangeHeaderValue(0, 1023);
+                    var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token);
+                    int status = (int)response.StatusCode;
+                    if (status != 301 && status != 302 && status != 303 && status != 307 && status != 308) return response;
+                    var location = response.Headers.Location; response.Dispose();
+                    if (redirects >= 5 || location == null) throw new InvalidDataException("Некорректное перенаправление");
+                    url = location.IsAbsoluteUri ? location : new Uri(url, location);
+                }
+            }
+        }
+        internal static async Task<byte[]> ReadBody(HttpResponseMessage response, int limit, CancellationToken token, bool sample = false) {
+            using (var stream = await response.Content.ReadAsStreamAsync())
+            using (var memory = new MemoryStream()) {
+                var buffer = new byte[8192];
+                // Disposing the stream also unblocks Framework streams that do not honour cancellation.
+                using (token.Register(() => stream.Dispose())) {
+                    while (true) {
+                        token.ThrowIfCancellationRequested();
+                        int count = await stream.ReadAsync(buffer, 0, Math.Min(buffer.Length, limit - (int)memory.Length + (sample ? 0 : 1)), token);
+                        if (count == 0) break;
+                        memory.Write(buffer, 0, count);
+                        if (memory.Length > limit) throw new InvalidDataException("Ответ превышает допустимый размер");
+                        if (sample && memory.Length == limit) break;
+                    }
+                }
+                token.ThrowIfCancellationRequested(); return memory.ToArray();
+            }
+        }
+        static async Task<string> ReadText(HttpResponseMessage response, int limit, CancellationToken token) {
+            return Encoding.UTF8.GetString(await ReadBody(response, limit, token));
+        }
+        static Dictionary<string,object> Parse(string text) {
+            try { var value = new JavaScriptSerializer().Deserialize<Dictionary<string,object>>(text); if (value != null) return value; }
+            catch (Exception ex) { if (!(ex is ArgumentException || ex is InvalidOperationException)) throw; }
+            throw new InvalidDataException("Некорректный JSON");
+        }
+        static async Task<string> Receive(WebSocket socket, CancellationToken token) {
+            using (var memory = new MemoryStream()) {
+                var buffer = new byte[4096];
+                while (true) {
+                    var message = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), token);
+                    if (message.MessageType != WebSocketMessageType.Text) throw new InvalidDataException("Gateway не вернул текстовое сообщение");
+                    memory.Write(buffer, 0, message.Count);
+                    if (memory.Length > 64 * 1024) throw new InvalidDataException("Слишком большое сообщение Gateway");
+                    if (message.EndOfMessage) return Encoding.UTF8.GetString(memory.ToArray());
+                }
+            }
+        }
+        internal static async Task VerifyGateway(WebSocket socket, CancellationToken token) {
+            // Discord Gateway: Hello (10), unauthenticated Heartbeat (1), ACK (11). No account token is needed.
+            var hello = Parse(await Receive(socket, token)); object op, data, interval;
+            var payload = hello.TryGetValue("d", out data) ? data as Dictionary<string,object> : null;
+            if (!hello.TryGetValue("op", out op) || !(op is int) || (int)op != 10 || payload == null || !payload.TryGetValue("heartbeat_interval", out interval) || !(interval is int) || (int)interval <= 0)
+                throw new InvalidDataException("Gateway не вернул Hello");
+            await socket.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes("{\"op\":1,\"d\":null}")), WebSocketMessageType.Text, true, token);
+            var ack = Parse(await Receive(socket, token));
+            if (!ack.TryGetValue("op", out op) || !(op is int) || (int)op != 11) throw new InvalidDataException("Gateway не подтвердил heartbeat");
+        }
+        static async Task CheckGateway(Uri url, CancellationToken token) {
+            using (var socket = new ClientWebSocket()) {
+                socket.Options.Proxy = null;
+                using (token.Register(() => socket.Abort())) {
+                    await socket.ConnectAsync(url, token);
+                    await VerifyGateway(socket, token);
+                }
+                // Do not wait for a close handshake during a bounded connectivity probe.
+                socket.Abort();
             }
         }
         public static CheckResult FromException(Exception error, long elapsed) {
@@ -52,12 +208,11 @@ namespace ZapretDesktop {
                     (socket != null && (socket.SocketErrorCode == SocketError.HostNotFound || socket.SocketErrorCode == SocketError.NoData || socket.SocketErrorCode == SocketError.TryAgain))) {
                     failure = "dns"; detail = "DNS · имя не найдено"; break;
                 }
-                if (ex is AuthenticationException || (web != null && (web.Status == WebExceptionStatus.TrustFailure || web.Status == WebExceptionStatus.SecureChannelFailure))) {failure = "tls"; detail = "Ошибка TLS";}
+                if (ex is AuthenticationException || (web != null && (web.Status == WebExceptionStatus.TrustFailure || web.Status == WebExceptionStatus.SecureChannelFailure))) { failure = "tls"; detail = "Ошибка TLS"; }
             }
-            return new CheckResult {State = 0, Failure = failure, Detail = detail + " | " + error.GetBaseException().Message, Milliseconds = elapsed};
+            return new CheckResult { State = 0, Failure = failure, Detail = detail + " | " + error.GetBaseException().Message, Milliseconds = elapsed };
         }
         public static async Task<CheckResult[]> Batch(CancellationToken token, Action<int, CheckResult> completed, int timeoutSeconds = 12) {
-            // Do not reuse an HTTP connection or .NET's cached DNS between strategies.
             ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
             ServicePointManager.DnsRefreshTimeout = 0;
             return await Task.WhenAll(Targets.Select(async (target,index) => {

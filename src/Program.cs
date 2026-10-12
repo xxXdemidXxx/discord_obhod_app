@@ -169,7 +169,7 @@ namespace ZapretDesktop {
         async Task StartEngine(string strategy,CancellationToken token) {
             token.ThrowIfCancellationRequested();await Task.Delay(150,token);
             activeStrategy=strategy;await Task.Run(()=>runner.Start(store.Current,strategy));RefreshState();
-            await Task.Delay(650,token);
+            try{await EngineRunner.WaitForReady(()=>runner.Running,()=>runner.Ready,token);}catch{runner.Stop();throw;}
             if(!runner.Running)throw new IOException("Ядро завершилось после запуска. Подробности в журнале.");
         }
         void InvalidateChecks(string reason) {checkEpoch++;dashboard.ClearResults(reason);}
@@ -194,16 +194,16 @@ namespace ZapretDesktop {
                     ()=>runner.Stop(),
                     async cancel=>await ServiceChecks.Batch(cancel,(index,item)=>{if(!IsDisposed)dashboard.SetResult(index,item);},quick?6:12),token,
                     (index,total,name)=>{if(IsDisposed)return;scanStep=index+" / "+total+" · "+Theme.StrategyName(name);dashboard.ScanSummary.Text=scanStep;dashboard.Progress(name);RefreshState();},
-                    candidate=>{if(IsDisposed)return;dashboard.Record(candidate);checkSummary.Text=candidate.Strategy.Replace(".bat","")+" · "+candidate.Passed+"/"+ServiceChecks.Targets.Length;Append("Автоподбор: "+candidate.Strategy+" · "+candidate.Passed+"/"+ServiceChecks.Targets.Length+(candidate.Error.Length>0?" · "+candidate.Error:""));},quick,async cancel=>await ServiceChecks.Batch(cancel,(index,item)=>{if(!IsDisposed)dashboard.SetResult(index,item);}));
+                    candidate=>{if(IsDisposed)return;dashboard.Record(candidate);checkSummary.Text=candidate.Strategy.Replace(".bat","")+" · "+candidate.Passed+"/"+ServiceChecks.Targets.Length;Append("Автоподбор: "+candidate.Strategy+" · "+candidate.Passed+"/"+ServiceChecks.Targets.Length+(candidate.Error.Length>0?" · "+candidate.Error:""));for(int i=0;i<candidate.Results.Length;i++)Append("  "+ServiceChecks.Targets[i].Name+": "+candidate.Results[i].Detail+" · "+candidate.Results[i].Milliseconds+" мс");},quick,async cancel=>await ServiceChecks.Batch(cancel,(index,item)=>{if(!IsDisposed)dashboard.SetResult(index,item);}));
                 if(result.Winner!=null) {
                     store.Settings.Strategy=result.Winner.Strategy;store.Save();activeStrategy=result.Winner.Strategy;chosen=true;
                     loading=true;categories.SelectedIndex=0;profiles.Items.Clear();profiles.Items.AddRange(names);profiles.SelectedItem=activeStrategy;loading=false;
                     for(int i=0;i<result.Winner.Results.Length;i++)dashboard.SetResult(i,result.Winner.Results[i]);
-                    checkSummary.Text="Все сервисы доступны";
+                    checkSummary.Text="Все сетевые проверки пройдены";
                     dashboard.ScanSummary.Text="Найден рабочий вариант: "+Theme.StrategyName(activeStrategy);
                 }else {
                     bool dnsFailure=result.Candidates.Any(x=>x.Results.Any(y=>y.Failure=="dns"));
-                    dashboard.ScanSummary.Text="Полного результата 5/5 не найдено."+(dnsFailure?"\nЕсть ошибки DNS — откройте диагностику.":"\nРезультаты всех стратегий — в таблице.");
+                    dashboard.ScanSummary.Text="Полного результата не найдено."+(dnsFailure?"\nЕсть ошибки DNS — откройте диагностику.":"\nРезультаты всех стратегий — в таблице.");
                 }
             }catch(OperationCanceledException){if(!IsDisposed)dashboard.ScanSummary.Text="Автоподбор отменён.";}
             catch(Exception ex){if(!IsDisposed){dashboard.ScanSummary.Text=ex is EngineSetupException?"Подбор остановлен: не удалось запустить ядро.\nПодробности — в журнале.":"Автоподбор завершился с ошибкой.";Error(ex);}}
@@ -240,7 +240,7 @@ namespace ZapretDesktop {
             dashboard.ClearResults("Проверяем: "+engineState+"…");RefreshState();
             try {
                 var results=await ServiceChecks.Batch(token,(index,item)=>{if(IsDisposed || epoch!=checkEpoch)return;dashboard.SetResult(index,item);Append(ServiceChecks.Targets[index].Name+": "+item.Detail+" · "+item.Milliseconds+" мс");});
-                if(!IsDisposed && epoch==checkEpoch){checkSummary.Text="Доступно: "+results.Count(x=>x.State==1)+" из 5"+(!runner.Running && !runner.Conflict?" · обход выключен":"");if(results.Any(x=>x.Failure=="dns"))dashboard.ScanSummary.Text="Есть ошибка DNS.\nНажмите «Диагностика DNS».";}
+                if(!IsDisposed && epoch==checkEpoch){checkSummary.Text="Доступно: "+results.Count(x=>x.State==1)+" из "+ServiceChecks.Targets.Length+(!runner.Running && !runner.Conflict?" · обход выключен":"");if(results.Any(x=>x.Failure=="dns"))dashboard.ScanSummary.Text="Есть ошибка DNS.\nНажмите «Диагностика DNS».";}
             }catch(OperationCanceledException){}catch(Exception ex){if(!IsDisposed)Error(ex);}
             finally{testing=false;localCancellation.Dispose();if(checkCancellation==localCancellation)checkCancellation=null;if(!IsDisposed)RefreshState();}
         }

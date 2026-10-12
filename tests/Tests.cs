@@ -170,7 +170,7 @@ namespace ZapretDesktop {
                 var root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".."));
                 var local = Path.GetFullPath(Path.Combine(root, "..", "zapret-discord-youtube-1.10.2"));
                 var official = Path.Combine(root, "downloads", "official-1.10.3", "zapret-discord-youtube-1.10.3");
-                local=official;SecurityTests(root,official);LegacyMigrationTest(root); SelectionTests().GetAwaiter().GetResult(); DomainTests(root); UpdateFeedTests().GetAwaiter().GetResult(); AppUpdateSessionTests(root).GetAwaiter().GetResult(); StageTests(root).GetAwaiter().GetResult(); ShellReplacementTest(root); ShellRollbackTest(root); ShellHandshakeTest(root);
+                local=official;SecurityTests(root,official);LegacyMigrationTest(root); SelectionTests().GetAwaiter().GetResult(); ServiceProbeTests().GetAwaiter().GetResult(); DomainTests(root); UpdateFeedTests().GetAwaiter().GetResult(); AppUpdateSessionTests(root).GetAwaiter().GetResult(); StageTests(root).GetAwaiter().GetResult(); ShellReplacementTest(root); ShellRollbackTest(root); ShellHandshakeTest(root);
                 foreach (var engine in new[] {local, official}.Distinct()) {
                     Strategy.ValidateEngine(engine);
                     var profiles = Directory.GetFiles(engine, "general*.bat"); Assert(profiles.Length == 22, "22 upstream profiles expected");
@@ -295,9 +295,10 @@ namespace ZapretDesktop {
                 Assert(form.GetChildAtPoint(edges[i])==null && SendMessage(form.Handle,0x84,IntPtr.Zero,new IntPtr(packed)).ToInt32()==hits[i],"Window edge and corner "+hits[i]+" reaches native resize handling");
             }
             var maximize=AllControls(form).OfType<Button>().Single(x=>x.Name=="MaximizeWindow");
-            Rectangle work=Screen.FromControl(form).WorkingArea;
             maximize.PerformClick();Application.DoEvents();
-            Assert(form.Visible && form.WindowState==FormWindowState.Maximized && form.Bounds==work,"Actual maximize button keeps the window visible inside monitor working area");
+            // Windows can move an off-screen test window to another monitor when maximizing.
+            Rectangle work=Screen.FromControl(form).WorkingArea;
+            Assert(form.Visible && form.WindowState==FormWindowState.Maximized && form.Bounds==work,"Actual maximize button keeps the window visible inside monitor working area: visible="+form.Visible+", state="+form.WindowState+", bounds="+form.Bounds+", expected="+work);
             maximize.PerformClick();Application.DoEvents();
             Assert(form.Visible && form.WindowState==FormWindowState.Normal,"Actual maximize button restores without hiding to tray");
             IntPtr data=Marshal.AllocHGlobal(40);
@@ -478,6 +479,7 @@ namespace ZapretDesktop {
                         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
                         var shellHttp=new MockHttp{Reply=url=>Response(200,url.EndsWith("update.json")?Feed("99.0.0"):new string('x',123))};int confirmations=0;
                         using(var form=new MainForm(store,false,false,false,false,new ShellUpdates(shellHttp),(title,message)=>{confirmations++;return false;},new Updater(store,coreHttp))) {
+                            bool externalCore=false;var fixtureRunner=(EngineRunner)typeof(MainForm).GetField("runner",flags).GetValue(form);fixtureRunner.ConflictCheck=()=>externalCore;
                             form.StartPosition=FormStartPosition.Manual;form.Location=new Point(-2500,-2500);
                             form.Shown+=async(s,e)=>{
                                 try {
@@ -492,6 +494,8 @@ namespace ZapretDesktop {
                                     Assert(downloads==0,"Core startup check cannot download without the automatic-install setting");
                                     var coreToggle=(CheckBox)typeof(MainForm).GetField("autoInstallCore",flags).GetValue(form);coreToggle.Checked=true;
                                     Assert(new Store(folder).Settings.AutoInstallCore && !new Store(folder).Settings.AutoInstallShell,"Core switch persists separately from shell installation");
+                                    externalCore=true;await (Task)typeof(MainForm).GetMethod("CheckUpdates",flags).Invoke(form,new object[]{true});
+                                    Assert(downloads==0,"Automatic core update waits while an external core is running");externalCore=false;
                                     await (Task)typeof(MainForm).GetMethod("CheckUpdates",flags).Invoke(form,new object[]{true});
                                     Assert(downloads==1 && confirmations==0 && Updater.Version(store.Current)=="1.10.3" && Trust.VerifyEngine(store.Current)!=null,"Opted-in core update downloads and installs the pinned verified archive without a confirmation dialog");
                                     Assert(File.ReadAllText(Path.Combine(store.Current,"lists","list-general-user.txt"))=="friend.example\n" && !String.IsNullOrEmpty(store.Settings.PreviousEngine),"Automatic core installation preserves user lists and the previous version");
@@ -607,23 +611,127 @@ namespace ZapretDesktop {
             var folder=Path.Combine(root,"tests","fixture-domains-"+Guid.NewGuid().ToString("N"));
             try{DomainLists.Write(folder,0,"first.example");string path=DomainLists.FilePath(folder,0);Reject(()=>DomainLists.Write(folder,0,"invalid url"),"Invalid list cannot overwrite saved entries");Assert(File.ReadAllText(path).Contains("first.example"),"Original list preserved on invalid input");DomainLists.Write(folder,0,"second.example");Assert(File.ReadAllText(path+".bak").Contains("first.example"),"Atomic domain replacement preserves backup");DomainLists.Write(folder,0,"");Assert(DomainLists.Read(folder,0)=="" && new FileInfo(path).Length>0,"Empty user lists remain compatible with the engine and show no placeholder");File.WriteAllText(path,"# Never leave this file empty\r\ndomain.example.abc\r\n");Assert(DomainLists.Read(folder,0)=="","Upstream technical comment is hidden from the editor");DomainLists.Write(folder,2,"");Assert(DomainLists.Read(folder,2)=="" && new FileInfo(DomainLists.FilePath(folder,2)).Length>0,"Empty IP exclusions retain the engine sentinel");}finally{RemoveFixture(folder);}
         }
+        sealed class ProbeHttp : System.Net.Http.HttpMessageHandler {
+            public Func<System.Net.Http.HttpRequestMessage,CancellationToken,Task<System.Net.Http.HttpResponseMessage>> Reply;
+            public int Calls;
+            protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(System.Net.Http.HttpRequestMessage request,CancellationToken token) { Calls++;return Reply(request,token); }
+        }
+        sealed class WaitingStream : MemoryStream {
+            public override async Task<int> ReadAsync(byte[] buffer,int offset,int count,CancellationToken token) { await Task.Delay(Timeout.Infinite,token);return 0; }
+        }
+        sealed class ProbeSocket : System.Net.WebSockets.WebSocket {
+            readonly System.Collections.Generic.Queue<string> messages;
+            public string Sent;
+            public bool Fragment; bool fragmented;
+            public ProbeSocket(params string[] texts) { messages=new System.Collections.Generic.Queue<string>(texts); }
+            public override System.Net.WebSockets.WebSocketCloseStatus? CloseStatus { get { return null; } }
+            public override string CloseStatusDescription { get { return null; } }
+            public override string SubProtocol { get { return null; } }
+            public override System.Net.WebSockets.WebSocketState State { get { return System.Net.WebSockets.WebSocketState.Open; } }
+            public override void Abort() {}
+            public override void Dispose() {}
+            public override Task CloseAsync(System.Net.WebSockets.WebSocketCloseStatus status,string description,CancellationToken token) { return Task.FromResult(0); }
+            public override Task CloseOutputAsync(System.Net.WebSockets.WebSocketCloseStatus status,string description,CancellationToken token) { return Task.FromResult(0); }
+            public override Task SendAsync(ArraySegment<byte> buffer,System.Net.WebSockets.WebSocketMessageType type,bool end,CancellationToken token) { Sent=System.Text.Encoding.UTF8.GetString(buffer.Array,buffer.Offset,buffer.Count);return Task.FromResult(0); }
+            public override async Task<System.Net.WebSockets.WebSocketReceiveResult> ReceiveAsync(ArraySegment<byte> buffer,CancellationToken token) {
+                if(messages.Count==0){await Task.Delay(Timeout.Infinite,token);throw new Exception("unreachable");}
+                string text=messages.Peek();bool end=true;
+                if(Fragment && !fragmented){text=text.Substring(0,5);fragmented=true;end=false;}else {messages.Dequeue();if(Fragment && fragmented && text.StartsWith("{\"op\":10"))text=text.Substring(5);}
+                byte[] bytes=System.Text.Encoding.UTF8.GetBytes(text);Array.Copy(bytes,0,buffer.Array,buffer.Offset,bytes.Length);
+                return new System.Net.WebSockets.WebSocketReceiveResult(bytes.Length,System.Net.WebSockets.WebSocketMessageType.Text,end);
+            }
+        }
+        static System.Net.Http.HttpResponseMessage DownloadSample(int status=206,int size=1024) {
+            var response=new System.Net.Http.HttpResponseMessage((System.Net.HttpStatusCode)status) {Content=new System.Net.Http.ByteArrayContent(Enumerable.Repeat((byte)42,size).ToArray())};
+            response.Content.Headers.ContentType=new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+            if(status==206)response.Content.Headers.ContentRange=new System.Net.Http.Headers.ContentRangeHeaderValue(0,size-1,100000);
+            return response;
+        }
+        static async Task ServiceProbeTests() {
+            var update=ServiceChecks.Targets.Single(x=>x.Kind==ProbeKind.DiscordUpdates);
+            var app=ServiceChecks.Targets.Single(x=>x.Kind==ProbeKind.DiscordApp);
+            var gateway=ServiceChecks.Targets.Single(x=>x.Kind==ProbeKind.DiscordGateway);
+            string manifest="{\"full\":{\"url\":\"https://stable.dl2.discordapp.net/distro/app/stable/win/x64/1.0.1/full.distro\"}}";
+            Func<Uri,CancellationToken,Task> noGateway=(url,token)=>{throw new Exception("Gateway must not run for this probe");};
+            var http=new ProbeHttp {Reply=(request,token)=>Task.FromResult(request.RequestUri.Host=="updates.discord.com"?Response(200,manifest):DownloadSample())};
+            var result=await ServiceChecks.Run(update,CancellationToken.None,2,http,noGateway);
+            Assert(result.State==1 && http.Calls==2 && result.Detail.Contains("1024"),"Updater probe requires both manifest and download bytes");
+            http=new ProbeHttp {Reply=(request,token)=>{if(request.RequestUri.Host=="updates.discord.com")return Task.FromResult(Response(200,manifest));Assert(request.Headers.Range.ToString()=="bytes=0-1023","Probe requests only a small download range");throw new System.Net.Http.HttpRequestException("fixture reset",new System.Net.Sockets.SocketException(10054));}};
+            result=await ServiceChecks.Run(update,CancellationToken.None,2,http,noGateway);
+            Assert(result.State==0 && result.Detail.Contains("stable.dl2.discordapp.net"),"Working manifest cannot hide a reset from download CDN");
+            http=new ProbeHttp {Reply=(request,token)=>Task.FromResult(Response(200,"<html>blocked</html>"))};
+            result=await ServiceChecks.Run(update,CancellationToken.None,2,http,noGateway);
+            Assert(result.State==2 && http.Calls==1,"HTTP 200 with HTML is not a successful update manifest");
+            http=new ProbeHttp {Reply=(request,token)=>Task.FromResult(Response(200,manifest.Replace("stable.dl2.discordapp.net","foreign.example")))};
+            result=await ServiceChecks.Run(update,CancellationToken.None,2,http,noGateway);
+            Assert(result.State==2 && http.Calls==1,"Foreign download hosts are refused without a request");
+            http=new ProbeHttp {Reply=(request,token)=>Task.FromResult(request.RequestUri.Host=="updates.discord.com"?Response(200,manifest):DownloadSample(206,12))};
+            Assert((await ServiceChecks.Run(update,CancellationToken.None,2,http,noGateway)).State==2,"Truncated update sample is not green");
+            http=new ProbeHttp {Reply=(request,token)=>Task.FromResult(request.RequestUri.Host=="updates.discord.com"?Response(200,manifest):Response(200,"<html>blocked</html>"))};
+            Assert((await ServiceChecks.Run(update,CancellationToken.None,2,http,noGateway)).State==2,"CDN error page with HTTP 200 is not green");
+            http=new ProbeHttp {Reply=(request,token)=>Task.FromResult(new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK){Content=new System.Net.Http.StreamContent(new WaitingStream())})};
+            var watch=Stopwatch.StartNew();result=await ServiceChecks.Run(update,CancellationToken.None,1,http,noGateway);
+            Assert(result.State==0 && result.Failure=="timeout" && watch.ElapsedMilliseconds<3000,"Timeout covers the body after successful HTTP headers");
+            using(var cancel=new CancellationTokenSource()) {
+                cancel.Cancel();http=new ProbeHttp {Reply=async(request,token)=>{await Task.Delay(Timeout.Infinite,token);return Response(200,manifest);}};
+                result=await ServiceChecks.Run(update,cancel.Token,2,http,noGateway);
+                Assert(result.State==0 && result.Failure=="cancelled","User cancellation is distinct from a timeout");
+            }
+            string html="<div id=\"app-mount\"></div><script src=\"/assets/first.js\"></script><script src=\"/assets/last.js\"></script>";
+            http=new ProbeHttp {Reply=(request,token)=>Task.FromResult(Response(request.RequestUri.AbsolutePath.EndsWith("last.js")?503:200,request.RequestUri.AbsolutePath=="/app"?html:"console.log('fixture');"))};
+            result=await ServiceChecks.Run(app,CancellationToken.None,2,http,noGateway);
+            Assert(result.State==2 && result.Detail.Contains("last.js"),"App HTML cannot hide a failed bootstrap script");
+            http=new ProbeHttp {Reply=(request,token)=>Task.FromResult(Response(200,request.RequestUri.AbsolutePath=="/app"?html:"console.log('fixture');"))};
+            result=await ServiceChecks.Run(app,CancellationToken.None,2,http,noGateway);
+            Assert(result.State==1 && http.Calls==3,"App probe reads HTML and both sampled bootstrap files");
+            http=new ProbeHttp {Reply=(request,token)=>{var response=Response(302,"");response.Headers.Location=new Uri("https://foreign.example/blocked");return Task.FromResult(response);}};
+            result=await ServiceChecks.Run(app,CancellationToken.None,2,http,noGateway);
+            Assert(result.State==2 && http.Calls==1,"Discord redirect to a foreign site is not green and is not followed");
+            http=new ProbeHttp {Reply=(request,token)=>Task.FromResult(Response(200,"{\"url\":\"wss://gateway.discord.gg\"}"))};
+            result=await ServiceChecks.Run(gateway,CancellationToken.None,1,http,async(url,token)=>{await Task.Delay(Timeout.Infinite,token);});
+            Assert(result.State==0 && result.Failure=="timeout" && result.Detail.Contains("gateway.discord.gg"),"API HTTP 200 cannot hide a blocked WebSocket");
+            var socket=new ProbeSocket("{\"op\":10,\"d\":{\"heartbeat_interval\":41250}}","{\"op\":11,\"d\":null}"){Fragment=true};
+            await ServiceChecks.VerifyGateway(socket,CancellationToken.None);
+            Assert(socket.Sent=="{\"op\":1,\"d\":null}","Gateway probe assembles fragmented Hello and requires heartbeat ACK without account credentials");
+            bool rejected=false;
+            try{await ServiceChecks.VerifyGateway(new ProbeSocket("{\"op\":10,\"d\":{\"heartbeat_interval\":41250}}","{\"op\":9}"),CancellationToken.None);}catch(InvalidDataException){rejected=true;}
+            Assert(rejected,"A WebSocket connection alone does not satisfy the Gateway check");
+            using(var cancel=new CancellationTokenSource(100)) {
+                bool cancelled=false;try{await ServiceChecks.VerifyGateway(new ProbeSocket("{\"op\":10,\"d\":{\"heartbeat_interval\":41250}}"),cancel.Token);}catch(OperationCanceledException){cancelled=true;}
+                Assert(cancelled,"Missing Gateway ACK remains cancellable");
+            }
+            using(var response=Response(200,new string('x',65))) {
+                rejected=false;try{await ServiceChecks.ReadBody(response,64,CancellationToken.None);}catch(InvalidDataException){rejected=true;}
+                Assert(rejected,"Body size is bounded even without a trusted Content-Length");
+            }
+            bool ready=false;var started=Stopwatch.StartNew();var waiting=EngineRunner.WaitForReady(()=>true,()=>ready,CancellationToken.None,1000);
+            await Task.Delay(150);Assert(!waiting.IsCompleted,"Probes wait for capture readiness rather than a fixed startup delay");ready=true;await waiting;
+            Assert(started.ElapsedMilliseconds>=150,"Capture readiness releases pending probes");
+            rejected=false;try{await EngineRunner.WaitForReady(()=>false,()=>true,CancellationToken.None);}catch(EngineStartException){rejected=true;}
+            Assert(rejected,"Exited core cannot pass readiness even with an old ready flag");
+            rejected=false;try{await EngineRunner.WaitForReady(()=>true,()=>false,CancellationToken.None,100);}catch(EngineStartException){rejected=true;}
+            Assert(rejected,"A live core without capture readiness cannot start network probes");
+            var partial=Enumerable.Range(0,ServiceChecks.Targets.Length).Select(i=>new CheckResult{State=i==4?0:1}).ToArray();
+            var selected=await StrategySelector.Run(new[]{"api-only"},(name,token)=>Task.FromResult(0),()=>{},token=>Task.FromResult(partial),CancellationToken.None,null,null,true);
+            Assert(selected.Winner==null,"Strategy with website and Gateway working but updater blocked is not auto-selected");
+        }
         static async Task SelectionTests() {
             string running=null; int checks=0; var started=new System.Collections.Generic.List<string>();
-            Func<int,long,CheckResult[]> results=(passed,ms)=>Enumerable.Range(0,5).Select(i=>new CheckResult{State=i<passed?1:0,Detail="fixture",Milliseconds=ms}).ToArray();
+            Func<int,long,CheckResult[]> results=(passed,ms)=>Enumerable.Range(0,ServiceChecks.Targets.Length).Select(i=>new CheckResult{State=i<passed?1:0,Detail="fixture",Milliseconds=ms}).ToArray();
             var selected=await StrategySelector.Run(new[]{"failed","slow","fast"},
                 (name,token)=>{running=name;started.Add(name);return Task.FromResult(0);},()=>running=null,
-                token=>{checks++;return Task.FromResult(results(running=="failed"?3:5,running=="fast"?10:100));},CancellationToken.None,null,null);
+                token=>{checks++;return Task.FromResult(results(running=="failed"?3:ServiceChecks.Targets.Length,running=="fast"?10:100));},CancellationToken.None,null,null);
             Assert(selected.Candidates.Count==3 && checks==4,"All candidates tested, winner retested");
             Assert(selected.Winner.Strategy=="fast" && selected.Winner.Confirmed && running=="fast","Fast confirmed winner stays running");
             running=null;int firstCalls=0;
             selected=await StrategySelector.Run(new[]{"first","second"},
                 (name,token)=>{running=name;return Task.FromResult(0);},()=>running=null,
-                token=>Task.FromResult(results(running=="first" && ++firstCalls>1?0:5,running=="first"?5:10)),CancellationToken.None,null,null);
+                token=>Task.FromResult(results(running=="first" && ++firstCalls>1?0:ServiceChecks.Targets.Length,running=="first"?5:10)),CancellationToken.None,null,null);
             Assert(selected.Winner.Strategy=="second" && selected.Candidates[0].Error.Length>0,"Failed confirmation advances to next complete strategy");
             using(var cancel=new CancellationTokenSource()) {
                 bool cancelled=false;
                 try {await StrategySelector.Run(new[]{"a","b"},(name,token)=>{running=name;return Task.FromResult(0);},()=>running=null,
-                    token=>{cancel.Cancel();token.ThrowIfCancellationRequested();return Task.FromResult(results(5,10));},cancel.Token,null,null);}catch(OperationCanceledException){cancelled=true;}
+                    token=>{cancel.Cancel();token.ThrowIfCancellationRequested();return Task.FromResult(results(ServiceChecks.Targets.Length,10));},cancel.Token,null,null);}catch(OperationCanceledException){cancelled=true;}
                 Assert(cancelled && running==null,"Cancellation stops owned candidate");
             }
             selected=await StrategySelector.Run(new[]{"broken","partial"},(name,token)=>{if(name=="broken")throw new IOException("fixture error");running=name;return Task.FromResult(0);},()=>running=null,
@@ -635,7 +743,7 @@ namespace ZapretDesktop {
             Assert(setupStopped && attempts==1 && running==null,"Shared preparation failure stops scan after one attempt instead of failing every row");
             attempts=0;setupStopped=false;
             try{await StrategySelector.Run(new[]{"a","b"},(name,token)=>{if(++attempts==2)throw new EngineSetupException("fixture reconnect failure");running=name;return Task.FromResult(0);},()=>running=null,
-                token=>Task.FromResult(results(5,10)),CancellationToken.None,null,null,true);}catch(EngineSetupException){setupStopped=true;}
+                token=>Task.FromResult(results(ServiceChecks.Targets.Length,10)),CancellationToken.None,null,null,true);}catch(EngineSetupException){setupStopped=true;}
             Assert(setupStopped && attempts==2 && running==null,"Preparation failure during winner confirmation also stops and cleans up");
             var dns=ServiceChecks.FromException(new System.Net.Http.HttpRequestException("outer",new System.Net.WebException("DNS",System.Net.WebExceptionStatus.NameResolutionFailure)),42);
             Assert(dns.Failure=="dns" && dns.Milliseconds==42,"Typed nested DNS error classified");
@@ -643,13 +751,13 @@ namespace ZapretDesktop {
             Assert(ServiceChecks.FromException(new System.Security.Authentication.AuthenticationException("fixture"),0).Failure=="tls","TLS failure remains distinct");
             int quickChecks=0,confirmations=0;running=null;
             selected=await StrategySelector.Run(new[]{"partial","working","unneeded"},(name,token)=>{running=name;return Task.FromResult(0);},()=>running=null,
-                token=>{quickChecks++;return Task.FromResult(results(running=="partial"?3:5,10));},CancellationToken.None,null,null,true,
-                token=>{confirmations++;return Task.FromResult(results(5,20));});
+                token=>{quickChecks++;return Task.FromResult(results(running=="partial"?3:ServiceChecks.Targets.Length,10));},CancellationToken.None,null,null,true,
+                token=>{confirmations++;return Task.FromResult(results(ServiceChecks.Targets.Length,20));});
             Assert(selected.Winner.Strategy=="working" && selected.Candidates.Count==2 && quickChecks==2 && confirmations==1,"Quick mode stops after first full result and separate confirmation");
             running=null;int confirmCalls=0;
             selected=await StrategySelector.Run(new[]{"flaky","good"},(name,token)=>{running=name;return Task.FromResult(0);},()=>running=null,
-                token=>Task.FromResult(results(5,10)),CancellationToken.None,null,null,true,
-                token=>{confirmCalls++;return Task.FromResult(results(running=="flaky"?4:5,20));});
+                token=>Task.FromResult(results(ServiceChecks.Targets.Length,10)),CancellationToken.None,null,null,true,
+                token=>{confirmCalls++;return Task.FromResult(results(running=="flaky"?4:ServiceChecks.Targets.Length,20));});
             Assert(selected.Winner.Strategy=="good" && confirmCalls==2,"Quick mode continues after failed confirmation");
             string next="99.0.0";
             string json="{\"tag_name\":\"v"+next+"\",\"draft\":false,\"prerelease\":false,\"assets\":[{\"name\":\"Obhod-"+next+"-win-x64.zip\",\"browser_download_url\":\"https://github.com/"+ShellUpdates.Repository+"/releases/download/v"+next+"/Obhod-"+next+"-win-x64.zip\",\"digest\":\"sha256:"+new string('a',64)+"\",\"size\":100}]}";
