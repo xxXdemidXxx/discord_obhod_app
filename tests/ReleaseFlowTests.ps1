@@ -36,4 +36,14 @@ try {
     $script:releaseConclusion='success'
     Assert-ReleaseFlow ((Wait-ByPassReleaseWorkflow -Api 'https://example.invalid' -Headers @{} -Commit $releaseCommit -TimeoutMinutes 1).id -eq 5) 'Successful exact-commit workflow rejected'
 }finally{Remove-Item Function:\Invoke-RestMethod}
+$originalCulture=[Globalization.CultureInfo]::CurrentCulture
+try {
+    [Globalization.CultureInfo]::CurrentCulture=[Globalization.CultureInfo]::GetCultureInfo('ru-RU')
+    $timestamp='2026-10-14T19:15:05.0000000Z';$expected=[DateTime]::new(2026,10,14,19,15,5,[DateTimeKind]::Utc)
+    foreach($value in @($timestamp,([DateTimeOffset]$timestamp),$expected) | Where-Object {$null -ne $_}){Assert-ReleaseFlow ((ConvertTo-ByPassUtcTime $value) -eq $expected) 'Report timestamp changed in Russian locale'}
+    $parsedReport=('{"scanned_at":"'+$timestamp+'"}' | ConvertFrom-Json)
+    Assert-ReleaseFlow ((ConvertTo-ByPassUtcTime $parsedReport.scanned_at) -eq $expected) 'Auto-converted JSON timestamp rejected'
+    Assert-ReleaseFlow ((ConvertTo-ByPassUtcTime '2026-10-14T22:15:05+03:00') -eq $expected) 'Explicit timestamp offset ignored'
+    Assert-ReleaseReject {ConvertTo-ByPassUtcTime '10/14/2026 19:15:05'} 'Culture-dependent ambiguous timestamp accepted'
+}finally{[Globalization.CultureInfo]::CurrentCulture=$originalCulture}
 Write-Output "PASS: $releaseChecks release flow checks"

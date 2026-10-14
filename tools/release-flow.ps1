@@ -43,3 +43,12 @@ function Assert-ByPassPublishedRelease {
     # separately against the commit before the assets are downloaded.
     if(-not $Commit -or $Commit -notmatch '^[a-f0-9]{40}$'){throw 'Invalid reviewed commit'}
 }
+
+function ConvertTo-ByPassUtcTime {
+    param([Parameter(Mandatory)]$Value)
+    if($Value -is [DateTimeOffset]){return $Value.UtcDateTime}
+    if($Value -is [DateTime]){return $Value.ToUniversalTime()}
+    $parsed=[DateTimeOffset]::MinValue
+    if($Value -isnot [string] -or $Value -notmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$' -or -not [DateTimeOffset]::TryParse($Value,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::AdjustToUniversal,[ref]$parsed)){throw 'Invalid ISO timestamp in release report'}
+    return $parsed.UtcDateTime
+}

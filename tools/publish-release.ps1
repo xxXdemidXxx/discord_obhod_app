@@ -1,5 +1,6 @@
 param([string]$ReleaseDirectory=(Join-Path $PSScriptRoot '..\releases'))
 $ErrorActionPreference='Stop'
+. (Join-Path $PSScriptRoot 'release-flow.ps1')
 $repository='xxXdemidXxx/discord_obhod_app'
 $root=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $commit= & git -C $root rev-parse HEAD
@@ -15,7 +16,7 @@ try {
 $signed=[Text.Encoding]::UTF8.GetString($payload) | ConvertFrom-Json
 if($signed.source_commit -ne $commit -or $signed.source_dirty){throw 'Signed release belongs to a different source state'}
 $report=Get-Content -LiteralPath (Join-Path $ReleaseDirectory 'security-report.json') -Raw | ConvertFrom-Json
-if($report.result -ne 'clean' -or [DateTime]::Parse($report.scanned_at).ToUniversalTime() -lt [DateTime]::UtcNow.AddDays(-1)){throw 'Release scan is missing or stale'}
+if($report.result -ne 'clean' -or (ConvertTo-ByPassUtcTime $report.scanned_at) -lt [DateTime]::UtcNow.AddDays(-1)){throw 'Release scan is missing or stale'}
 if((Get-FileHash -LiteralPath (Join-Path $ReleaseDirectory 'security-report.json') -Algorithm SHA256).Hash.ToLowerInvariant() -ne $signed.security_report_sha256){throw 'Scan report changed after signing'}
 foreach($entry in $report.files){if((Get-FileHash -LiteralPath (Join-Path $ReleaseDirectory $entry.name) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $entry.sha256){throw 'Package changed after signing'}}
 # Read the existing Git credential into memory only; never print or store it.
