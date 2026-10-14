@@ -7,6 +7,32 @@ using System.IO;
 using System.Windows.Forms;
 
 namespace ZapretDesktop {
+    internal static class StartupRegistration {
+        const string Key=@"Software\Microsoft\Windows\CurrentVersion\Run";
+        const string Name="ByPass";
+#if TESTING
+        internal static Func<string> TestRead=null;
+        internal static Action<string> TestWrite=null;
+#endif
+        internal static string Command(string image){return "\""+Path.GetFullPath(image)+"\" --tray";}
+        internal static string Read(){
+#if TESTING
+            if(TestRead!=null)return TestRead();
+#endif
+            using(var key=Microsoft.Win32.Registry.CurrentUser.OpenSubKey(Key))return key==null?null:key.GetValue(Name) as string;
+        }
+        internal static void Write(string value){
+#if TESTING
+            if(TestWrite!=null){TestWrite(value);return;}
+#endif
+            using(var key=Microsoft.Win32.Registry.CurrentUser.CreateSubKey(Key)){if(value==null)key.DeleteValue(Name,false);else key.SetValue(Name,value,Microsoft.Win32.RegistryValueKind.String);}
+        }
+        internal static void Set(bool enabled,string image) {
+            string current=Read();
+            if(current!=null && current!=Command(image))throw new InvalidOperationException("Запуск значка ByPass уже настроен из другой папки. Отключите его в той программе.");
+            Write(enabled?Command(image):null);
+        }
+    }
     public static class AppShortcut {
         public static void Create() {
             var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "ByPass.lnk");

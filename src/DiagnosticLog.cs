@@ -10,7 +10,7 @@ namespace ZapretDesktop {
             report.AppendLine("Оболочка: "+ShellUpdates.Current);report.AppendLine("Ядро: "+Updater.Version(store.Current));
             report.AppendLine("Windows: "+Environment.OSVersion+" · "+(Environment.Is64BitOperatingSystem?"64":"32")+" бит");
             report.AppendLine("Обход: "+(running?"включён":"выключен"));report.AppendLine("Стратегия: "+strategy);
-            report.AppendLine("Автообновление оболочки: "+store.Settings.AutoInstallShell+"; ядра: "+store.Settings.AutoInstallCore);
+            report.AppendLine("Автозапуск Windows (сохранённая настройка): "+store.Settings.StartWithWindows);report.AppendLine("Автообновление оболочки: "+store.Settings.AutoInstallShell+"; ядра: "+store.Settings.AutoInstallCore);
             report.AppendLine();report.AppendLine("Сообщения приложения:");
             string saved=Path.Combine(store.Root,"data","app.log");
             if(File.Exists(saved)) {

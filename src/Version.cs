@@ -4,5 +4,5 @@ using System.Reflection;
 [assembly: AssemblyTitle("ByPass")]
 [assembly: AssemblyProduct("ByPass")]
 namespace ZapretDesktop {
-    public static class AppVersion { public const string Value = "0.5.7.0"; }
+    public static class AppVersion { public const string Value = "0.5.8.0"; }
 }

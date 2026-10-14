@@ -149,13 +149,13 @@ namespace ZapretDesktop {
                 File.WriteAllText(Path.Combine(stage,"release-proof.json"),proof);
             }
         }
-        public static async Task Launch(string prepared,string target,bool reconnect) {
+        public static async Task Launch(string prepared,string target,bool reconnect,bool tray=false) {
             using(var executableLock=new FileStream(prepared,FileMode.Open,FileAccess.Read,FileShare.Read))
             using(var configLock=new FileStream(prepared+".config",FileMode.Open,FileAccess.Read,FileShare.Read)) {
             InstallationRoot(prepared,target);ValidatePrepared(prepared);
             string ready=Path.Combine(Path.GetDirectoryName(prepared),"helper-ready.txt");
             if(File.Exists(ready))File.Delete(ready);
-            using(var helper=Process.Start(new ProcessStartInfo(prepared,"--apply-update "+Process.GetCurrentProcess().Id+" "+Strategy.Quote(target)+(reconnect?" --connect":"")+" --ready"){UseShellExecute=false,CreateNoWindow=true,WorkingDirectory=Path.GetDirectoryName(target)})) {
+            using(var helper=Process.Start(new ProcessStartInfo(prepared,"--apply-update "+Process.GetCurrentProcess().Id+" "+Strategy.Quote(target)+(reconnect?" --connect":"")+(tray?" --tray":"")+" --ready"){UseShellExecute=false,CreateNoWindow=true,WorkingDirectory=Path.GetDirectoryName(target)})) {
                 var watch=Stopwatch.StartNew();
                 while(!File.Exists(ready)) {
                     if(helper.HasExited)throw new IOException("Не удалось подготовить установку.");
@@ -188,7 +188,7 @@ namespace ZapretDesktop {
             using(var executableLock=new FileStream(Application.ExecutablePath,FileMode.Open,FileAccess.Read,FileShare.Read))
             using(var configLock=new FileStream(Application.ExecutablePath+".config",FileMode.Open,FileAccess.Read,FileShare.Read)) {
             string target=null,root=null,backup=null;bool replaced=false,configReplaced=false,configCreated=false,proofReplaced=false;string configBackup=null,oldProof=null;
-            bool handshake=args.Contains("--ready"),reconnect=args.Contains("--connect");int pid=0;
+            bool handshake=args.Contains("--ready"),reconnect=args.Contains("--connect"),tray=args.Contains("--tray");int pid=0;
             try {
                 pid=Int32.Parse(args[1]);string source=Application.ExecutablePath;
                 root=InstallationRoot(source,args[2]);target=Path.GetFullPath(args[2]);
@@ -204,7 +204,7 @@ namespace ZapretDesktop {
                 string identity=Path.Combine(root,OwnerIdentity.ProofName);oldProof=File.Exists(identity)?File.ReadAllText(identity):null;
                 File.WriteAllText(identity,File.ReadAllText(Path.Combine(Path.GetDirectoryName(source),OwnerIdentity.ProofName)));proofReplaced=true;
                 WriteOutcome(root,true,null);
-                Process.Start(new ProcessStartInfo(target,reconnect?"--connect":""){UseShellExecute=true,WorkingDirectory=root});
+                Process.Start(new ProcessStartInfo(target,(reconnect?"--connect":"")+(tray?" --tray":"")){UseShellExecute=true,WorkingDirectory=root});
             }catch(Exception ex) {
                 try {if(proofReplaced){string identity=Path.Combine(root,OwnerIdentity.ProofName);if(oldProof==null)File.Delete(identity);else File.WriteAllText(identity,oldProof);}if(configReplaced)File.Copy(configBackup,target+".config",true);else if(configCreated)File.Delete(target+".config");if(replaced)File.Copy(backup,target,true);}catch{}
                 // The existing application displays the result in its Updates tab.
@@ -213,7 +213,7 @@ namespace ZapretDesktop {
                 if(root!=null && target!=null) {
                     try{WriteOutcome(root,false,ex.Message);}catch{}
                     if(!handshake || !parentAlive) {
-                        try{WaitForExit(pid);if(File.Exists(target))Process.Start(new ProcessStartInfo(target,reconnect?"--connect":""){UseShellExecute=true,WorkingDirectory=root});}catch{}
+                        try{WaitForExit(pid);if(File.Exists(target))Process.Start(new ProcessStartInfo(target,(reconnect?"--connect":"")+(tray?" --tray":"")){UseShellExecute=true,WorkingDirectory=root});}catch{}
                     }
                 }
             }

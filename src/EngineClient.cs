@@ -15,18 +15,23 @@ namespace ZapretDesktop {
         readonly object gate=new object();readonly AutoResetEvent response=new AutoResetEvent(false);
         Dictionary<string,object> reply;volatile bool running,connected,ready;Exception failure;volatile string driverFailure;
         public event Action<string> Log;
-        public bool Running {get{return running;}}
-        public bool Ready {get{return running && ready;}} public string DriverFailure {get{return driverFailure;}}
+        StartupState startup=new StartupState();
+        internal bool StartupEnabled {get{return startup.Owned;}}
+        internal string StartupStrategy {get{return startup.Strategy;}}
+        internal string StartupEngine {get{return startup.Engine;}}
+        internal void RefreshStartup(){if(!Monitor.TryEnter(gate))return;try{startup=StartupService.Read(AppDomain.CurrentDomain.BaseDirectory);}finally{Monitor.Exit(gate);}}
+        public bool Running {get{return startup.Owned?startup.Running:running;}}
+        public bool Ready {get{return startup.Owned?startup.Running:running && ready;}} public string DriverFailure {get{return driverFailure;}}
 #if TESTING
-        internal Func<bool> ConflictCheck=null;
+        internal Func<bool> ConflictCheck=null; internal Action<bool,string,string> TestStartupChange=null;
 #endif
         public bool Conflict {
             get {
 #if TESTING
                 if(ConflictCheck!=null)return ConflictCheck();
 #endif
-                if(running)return false;
-                var processes=Process.GetProcessesByName("winws");bool found=processes.Length>0;
+                if(running && !startup.Owned)return false;
+                var processes=Process.GetProcessesByName("winws");bool found=System.Linq.Enumerable.Any(processes,p=>!startup.Owned || (uint)p.Id!=startup.ProcessId);
                 foreach(var process in processes)process.Dispose();return found;
             }
         }
@@ -71,9 +76,9 @@ namespace ZapretDesktop {
             lock(gate) {
                 if(!connected)throw new IOException("Компонент запуска отключён.");reply=null;response.Reset();
                 HostWire.Write(pipe,new{action=action,engine=engine,strategy=strategy});
-                if(!response.WaitOne(15000)){connected=false;pipe.Dispose();running=false;throw new IOException("Компонент запуска не ответил.");}
+                if(!response.WaitOne(45000)){connected=false;pipe.Dispose();running=false;throw new IOException("Компонент запуска не ответил.");}
                 if(reply==null)throw new IOException("Связь с компонентом запуска прервана.",failure);
-                running=Convert.ToBoolean(reply["running"]);if(!running)ready=false;string error=(string)reply["error"];
+                running=Convert.ToBoolean(reply["running"]);RefreshStartup();if(!running)ready=false;string error=(string)reply["error"];
                 if(error.Length>0){object kind;if(reply.TryGetValue("error_kind",out kind) && (string)kind=="driver")throw new EngineDriverException(error);if(reply.TryGetValue("error_kind",out kind) && (string)kind=="setup")throw new EngineSetupException("Не удалось подготовить ядро.\n"+error);throw new EngineStartException(error);}
             }
         }
@@ -88,7 +93,17 @@ namespace ZapretDesktop {
             try{Ask("start",Path.GetFileName(engine),strategy);}catch(IOException ex){throw new EngineSetupException("Не удалось связаться с компонентом запуска. Повторите запуск ByPass.\n"+ex.Message,ex);}
             }
         }
-        public void Stop(){ready=false;if(connected)Ask("stop",null,null);running=false;}
+        public void Stop(){lock(gate){ready=false;if(StartupEnabled && !connected)Connect();if(connected)Ask("stop",null,null);running=false;}}
+        internal void SetStartup(bool enabled,string engine,string strategy) {
+            lock(gate){
+#if TESTING
+                if(TestStartupChange!=null){TestStartupChange(enabled,engine,strategy);RefreshStartup();return;}
+#endif
+                Connect();Ask(enabled?"startup-enable":"startup-disable",enabled?Path.GetFileName(engine):null,enabled?strategy:null);RefreshStartup();}
+        }
+        internal void SyncStartup(string engine,string strategy) {
+            lock(gate){RefreshStartup();if(!StartupEnabled)return;Connect();Ask("startup-sync",Path.GetFileName(engine),strategy);}
+        }
         internal static async Task WaitForReady(Func<bool> running,Func<bool> ready,CancellationToken token,int timeoutMilliseconds=10000,Func<string> driverError=null) {
             var watch=Stopwatch.StartNew();
             while(true) {

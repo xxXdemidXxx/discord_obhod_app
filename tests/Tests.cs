@@ -35,6 +35,61 @@ namespace ZapretDesktop {
             File.WriteAllText(Path.Combine(Path.GetDirectoryName(source),"release-proof.json"),Proof(ShellUpdates.Current,source,source+".config","sha256:"+new string('a',64),123));
             File.WriteAllText(Path.Combine(Path.GetDirectoryName(source),OwnerIdentity.ProofName),BuildProof(source,source+".config"));
         }
+        static void StartupTests(string root,string official) {
+            string folder=Path.Combine(root,"tests","fixture-startup-"+Guid.NewGuid().ToString("N"));
+            string snapshot=Path.Combine(folder,"startup-"+Guid.NewGuid().ToString("N"));Copy(official,snapshot);
+            try {
+                string image=StartupService.Command(snapshot,"general.bat");
+                var parts=Strategy.Split(image);
+                Assert(parts[0]==Path.Combine(snapshot,"bin","winws.exe") && parts.Skip(1).All(x=>x.StartsWith("--")),"Service command quotes executable and contains parsed upstream arguments");
+                var state=new StartupState{Snapshot=snapshot,Image=image,Strategy="general.bat"};
+                StartupService.ValidateRecord(state,folder,image);Assert(true,"Service record accepts only trusted protected snapshot and exact command");
+                Reject(()=>StartupService.ValidateRecord(state,Path.Combine(folder,"other"),image),"Service snapshot cannot escape protected root");
+                Reject(()=>StartupService.ValidateRecord(state,folder,image+" --evil"),"Changed service binary path cannot be adopted");
+                state.Strategy="../general.bat";Reject(()=>StartupService.ValidateRecord(state,folder,image),"Service strategy path traversal rejected");state.Strategy="general.bat";
+                File.AppendAllText(Path.Combine(snapshot,"bin","winws.exe"),"tamper");Reject(()=>StartupService.ValidateRecord(state,folder,image),"Service mutation rejects modified SYSTEM executable");
+                Assert(StartupService.SameInstallation(folder,folder.ToUpperInvariant()+"\\") && !StartupService.SameInstallation(folder,folder+"-other"),"Service ownership uses exact normalized installation path");
+                string exe=Path.Combine(folder,"Папка с пробелами","ByPass.exe");var startupArgs=Strategy.Split(StartupRegistration.Command(exe));
+                Assert(startupArgs.SequenceEqual(new[]{exe,"--tray"}),"User logon opens GUI only in tray without reconnect or elevation flags");
+                string value=null;StartupRegistration.TestRead=()=>value;StartupRegistration.TestWrite=next=>value=next;
+                StartupRegistration.Set(true,exe);Assert(value==StartupRegistration.Command(exe),"Tray registration stores exact executable and tray argument");
+                bool conflict=false;try{StartupRegistration.Set(false,exe+".other");}catch(InvalidOperationException){conflict=true;}
+                Assert(conflict && value==StartupRegistration.Command(exe),"Tray removal cannot overwrite another installation");
+                StartupRegistration.Set(false,exe);Assert(value==null,"Disabling startup removes owned tray entry");
+            }finally{StartupRegistration.TestRead=null;StartupRegistration.TestWrite=null;RemoveFixture(folder);}
+        }
+        static void StartupUiTests(MainForm form,Store store,string root) {
+            SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
+            var flags=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic;
+            var runner=(EngineRunner)typeof(MainForm).GetField("runner",flags).GetValue(form);
+            var checkbox=AllControls(form).OfType<CheckBox>().Single(x=>x.Text=="Запускать при старте Windows");
+            var state=new StartupState();string registration=null;bool denied=false;int changes=0;var oldConflict=runner.ConflictCheck;runner.ConflictCheck=()=>false;AllControls(form).OfType<DomainEditor>().Single().Discard();
+            StartupService.TestRead=_=>state;StartupRegistration.TestRead=()=>registration;StartupRegistration.TestWrite=value=>registration=value;
+            runner.TestStartupChange=(enabled,engine,strategy)=>{changes++;if(denied)throw new System.ComponentModel.Win32Exception(1223);state=new StartupState{Installed=enabled,Owned=enabled,Running=false,Engine=Path.GetFileName(engine),Strategy=strategy};};
+            Action refresh=()=>typeof(MainForm).GetMethod("RefreshState",flags).Invoke(form,null);
+            Action wait=()=>{var watch=Stopwatch.StartNew();while((bool)typeof(MainForm).GetField("busy",flags).GetValue(form) && watch.ElapsedMilliseconds<10000){Application.DoEvents();Thread.Sleep(10);}Assert(!(bool)typeof(MainForm).GetField("busy",flags).GetValue(form),"Startup UI operation completes without blocking window");};
+            try {
+                FindTabs(form).SelectedIndex=1;refresh();Application.DoEvents();
+                Assert(!checkbox.Checked && checkbox.Enabled,"Startup checkbox defaults off based on SCM, not old JSON");
+                Assert(checkbox.Parent.Top<AllControls(form).OfType<Label>().Single(x=>x.Text=="Игровые соединения").Parent.Top,"Startup option stays above game settings and expanded port controls");
+                SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());checkbox.Checked=true;wait();
+                Assert(checkbox.Checked && store.Settings.StartWithWindows && registration==StartupRegistration.Command(Application.ExecutablePath),"Startup checkbox registers tray and persists only after service acknowledges success: checked="+checkbox.Checked+", saved="+store.Settings.StartWithWindows+", changes="+changes+", notices="+String.Join(" | ",AllControls(form).OfType<ProblemNotice>().Select(x=>x.Message.Text)));
+                Assert(AllControls(form).OfType<Label>().Any(x=>x.Text.Contains("обход запустится при старте Windows")),"Stopped service keeps startup enabled for next boot");
+                Capture(form,Path.Combine(root,"tests","window-startup-enabled.png"));
+                SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());checkbox.Checked=false;wait();Assert(!checkbox.Checked && !store.Settings.StartWithWindows && registration==null,"Disabling checkbox removes both startup registrations");
+                denied=true;SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());checkbox.Checked=true;wait();Assert(!checkbox.Checked && registration==null && !store.Settings.StartWithWindows,"Declined UAC restores checkbox and previous user logon registration");
+                Assert(changes==3,"Each checkbox action issues a single service request");
+                state=new StartupState{Installed=true,Owned=true,Running=true,Engine=store.Settings.Engine,Strategy=store.Settings.Strategy};
+                using(var trayForm=new MainForm(store,false,startInTray:true)) {
+                    trayForm.Show();Application.DoEvents();
+                    Assert(!trayForm.Visible && !trayForm.ShowInTaskbar,"Logon launch creates tray icon without displaying window or taskbar entry");
+                    typeof(MainForm).GetMethod("Restore",flags).Invoke(trayForm,null);Application.DoEvents();Assert(trayForm.Visible && trayForm.ShowInTaskbar,"Tray restore opens existing window on demand");
+                    typeof(MainForm).GetMethod("Exit",flags).Invoke(trayForm,null);Assert(!trayForm.Visible && state.Running,"Exiting GUI leaves boot service running");
+                }
+                state=new StartupState();refresh();store.Settings.StartWithWindows=false;store.Save();
+
+            }finally{runner.ConflictCheck=oldConflict;runner.TestStartupChange=null;StartupService.TestRead=null;StartupRegistration.TestRead=null;StartupRegistration.TestWrite=null;}
+        }
         static void SecurityTests(string root,string official) {
             var valid=Feed("99.0.0");Assert(ShellUpdates.Parse(valid).Version=="99.0.0","Offline signed release accepted");
             Reject(()=>ShellUpdates.Parse(RawFeed("99.0.0")),"Unsigned release rejected");
@@ -170,7 +225,7 @@ namespace ZapretDesktop {
                 var root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".."));
                 var local = Path.GetFullPath(Path.Combine(root, "..", "zapret-discord-youtube-1.10.2"));
                 var official = Path.Combine(root, "downloads", "official-1.10.3", "zapret-discord-youtube-1.10.3");
-                local=official;SecurityTests(root,official);LegacyMigrationTest(root); DriverRecoveryTests(root); FeedbackAndDriverTests(root,official).GetAwaiter().GetResult(); SelectionTests().GetAwaiter().GetResult(); ServiceProbeTests().GetAwaiter().GetResult(); DomainTests(root); UpdateFeedTests().GetAwaiter().GetResult(); AppUpdateSessionTests(root).GetAwaiter().GetResult(); StageTests(root).GetAwaiter().GetResult(); ShellReplacementTest(root); ShellRollbackTest(root); ShellHandshakeTest(root);
+                local=official;StartupTests(root,official);SecurityTests(root,official);LegacyMigrationTest(root); DriverRecoveryTests(root); FeedbackAndDriverTests(root,official).GetAwaiter().GetResult(); SelectionTests().GetAwaiter().GetResult(); ServiceProbeTests().GetAwaiter().GetResult(); DomainTests(root); UpdateFeedTests().GetAwaiter().GetResult(); AppUpdateSessionTests(root).GetAwaiter().GetResult(); StageTests(root).GetAwaiter().GetResult(); ShellReplacementTest(root); ShellRollbackTest(root); ShellHandshakeTest(root);
                 foreach (var engine in new[] {local, official}.Distinct()) {
                     Strategy.ValidateEngine(engine);
                     var profiles = Directory.GetFiles(engine, "general*.bat"); Assert(profiles.Length == 22, "22 upstream profiles expected");
@@ -245,7 +300,7 @@ namespace ZapretDesktop {
                             pages.SelectedIndex = 0;
                         }
                         using (var image = new Bitmap(form.Width, form.Height)) { form.DrawToBitmap(image, new Rectangle(Point.Empty, form.Size)); image.Save(Path.Combine(root, "tests", "window.png")); }
-                        Assert(form.Controls.Count > 0, "Desktop UI constructed and rendered"); ProblemUiChecks(form,root); DiagnosticLogTests(store,root); InteractiveUiChecks(form,root); ResponsiveScreens(form,root); AppUpdateUiTests(store,root); AutomaticUpdateTests(root,official); AppUpdateOutcomeUiTests(store);
+                        Assert(form.Controls.Count > 0, "Desktop UI constructed and rendered"); ProblemUiChecks(form,root); DiagnosticLogTests(store,root); InteractiveUiChecks(form,root); ResponsiveScreens(form,root); StartupUiTests(form,store,root);AppUpdateUiTests(store,root); AutomaticUpdateTests(root,official); AppUpdateOutcomeUiTests(store);
                         var tabs = FindTabs(form);
                         for (int i = 1; i < tabs.TabPages.Count; i++) {
                             tabs.SelectedIndex = i; form.PerformLayout(); Application.DoEvents();

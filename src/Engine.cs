@@ -31,7 +31,7 @@ namespace ZapretDesktop {
         public bool CheckUpdates = true;
         public bool AutoAppUpdates = true;
         public bool AutoInstallShell = false;
-        public bool AutoInstallCore = false;
+        public bool AutoInstallCore = false; public bool StartWithWindows = false;
     }
 
     public sealed class Store {

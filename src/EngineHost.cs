@@ -108,6 +108,8 @@ namespace ZapretDesktop {
                             bool preparing=false;
                             try {
                                 switch(action) {
+                                    case "startup-enable":
+                                    case "startup-sync":
                                     case "start":
                                         preparing=true;
                                         runner.Stop();
@@ -117,6 +119,12 @@ namespace ZapretDesktop {
                                         Dictionary<string,byte[]> inputs=null;
                                         // Read with the caller's token, so the administrator cannot be used to read privileged files.
                                         HostWire.AsCaller(parent,()=>{inputs=ReadInputs(source);});
+                                        var startup=StartupService.Read(installation);
+                                        if(action=="startup-enable" || action=="startup-sync" || startup.Owned) {
+                                            if(action=="startup-sync" && !startup.Owned)throw new InvalidOperationException("Автозапуск не установлен.");
+                                            StartupService.Configure(installation,version,strategy,inputs,action!="startup-sync" || startup.Running,line=>HostWire.Write(pipe,new{type="log",text=line}));
+                                            preparing=false;break;
+                                        }
                                         if(preparedVersion!=null && preparedVersion!=version){snapshot=Path.Combine(HostWire.ProtectedRoot,"runtime-"+Guid.NewGuid().ToString("N"));HostWire.ProtectDirectory(snapshot);snapshots.Add(snapshot);preparedVersion=null;}
                                         WriteSnapshot(snapshot,inputs,preparedVersion!=null);preparedVersion=version;
                                         var driverPaths=RegisteredDriverPaths();
@@ -125,13 +133,17 @@ namespace ZapretDesktop {
                                             HostWire.Write(pipe,new{type="log",text="Восстановлен проверенный драйвер ByPass: "+repaired});
                                         DriverServiceRecovery.Repair(line=>HostWire.Write(pipe,new{type="log",text=line}));
                                         preparing=false;runner.Start(snapshot,strategy);break;
-                                    case "stop":runner.Stop();break;
+                                    case "startup-disable":runner.Stop();StartupService.Remove(installation);break;
+                                    case "stop":runner.Stop();if(StartupService.Read(installation).Owned)StartupService.Stop(installation);break;
                                     case "status":break;
                                     case "shutdown":runner.Stop();done=true;break;
                                     default:throw new InvalidDataException("Неизвестная команда.");
                                 }
-                                HostWire.Write(pipe,new{type="reply",running=runner.Running,error=""});
-                            }catch(Exception ex){HostWire.Write(pipe,new{type="reply",running=runner.Running,error=ex.Message,error_kind=ex is EngineDriverException?"driver":preparing?"setup":"strategy"});}
+                                var serviceState=StartupService.Read(installation);
+                                HostWire.Write(pipe,new{type="reply",running=serviceState.Owned?serviceState.Running:runner.Running,error=""});
+                            }catch(Exception ex){
+                                var serviceState=StartupService.Read(installation);
+                                        HostWire.Write(pipe,new{type="reply",running=serviceState.Owned?serviceState.Running:runner.Running,error=ex.Message,error_kind=ex is EngineDriverException?"driver":preparing?"setup":"strategy"});}
                         }
                     }finally{runner.Stop();foreach(string folder in snapshots)try{CleanupSnapshot(folder,RegisteredDriverPaths());}catch{}}
                 }
