@@ -46,4 +46,17 @@ try {
     Assert-ReleaseFlow ((ConvertTo-ByPassUtcTime '2026-10-14T22:15:05+03:00') -eq $expected) 'Explicit timestamp offset ignored'
     Assert-ReleaseReject {ConvertTo-ByPassUtcTime '10/14/2026 19:15:05'} 'Culture-dependent ambiguous timestamp accepted'
 }finally{[Globalization.CultureInfo]::CurrentCulture=$originalCulture}
+. "$PSScriptRoot\..\tools\defender-update.ps1"
+$script:psUpdates=0;$script:nativeUpdates=0;$script:delays=0
+Update-ByPassDefenderSignatures -PowerShellUpdate {$script:psUpdates++} -CommandLineUpdate {$script:nativeUpdates++} -Delay {$script:delays++}
+Assert-ReleaseFlow ($script:psUpdates -eq 1 -and $script:nativeUpdates -eq 0 -and $script:delays -eq 0) 'Successful Defender update should not retry'
+$script:psUpdates=0;$script:nativeUpdates=0
+Update-ByPassDefenderSignatures -PowerShellUpdate {$script:psUpdates++;throw 'RPC unavailable'} -CommandLineUpdate {$script:nativeUpdates++} -Delay {$script:delays++} 3>$null
+Assert-ReleaseFlow ($script:psUpdates -eq 1 -and $script:nativeUpdates -eq 1) 'RPC failure must use the native Microsoft signature updater'
+$script:psUpdates=0;$script:nativeUpdates=0;$script:delays=0
+Update-ByPassDefenderSignatures -PowerShellUpdate {$script:psUpdates++;throw 'RPC unavailable'} -CommandLineUpdate {$script:nativeUpdates++;if($script:nativeUpdates -lt 2){throw 'Service starting'}} -Delay {$script:delays++} 3>$null
+Assert-ReleaseFlow ($script:psUpdates -eq 2 -and $script:nativeUpdates -eq 2 -and $script:delays -eq 1) 'Defender service startup requires bounded retries'
+$script:psUpdates=0;$script:nativeUpdates=0;$script:delays=0
+Assert-ReleaseReject {Update-ByPassDefenderSignatures -PowerShellUpdate {$script:psUpdates++;throw 'RPC unavailable'} -CommandLineUpdate {$script:nativeUpdates++;throw 'Native update failed'} -Delay {$script:delays++} 3>$null} 'Failed updates through both clients must never pass'
+Assert-ReleaseFlow ($script:psUpdates -eq 3 -and $script:nativeUpdates -eq 3 -and $script:delays -eq 2) 'Defender update retries must be bounded'
 Write-Output "PASS: $releaseChecks release flow checks"

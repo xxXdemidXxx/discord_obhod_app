@@ -27,7 +27,13 @@ jobs:
         shell: pwsh
         run: |
           Start-Service WinDefend
-          Update-MpSignature
+          . ./tools/defender-update.ps1
+          $scanner=Get-ChildItem -LiteralPath (Join-Path $env:ProgramData 'Microsoft\Windows Defender\Platform') -Directory | Sort-Object Name -Descending | ForEach-Object {Join-Path $_.FullName 'MpCmdRun.exe'} | Where-Object {Test-Path -LiteralPath $_} | Select-Object -First 1
+          if(-not $scanner){$scanner=Join-Path $env:ProgramFiles 'Windows Defender\MpCmdRun.exe'}
+          Update-ByPassDefenderSignatures -PowerShellUpdate {Update-MpSignature -ErrorAction Stop} -CommandLineUpdate {
+            & $scanner -SignatureUpdate
+            if($LASTEXITCODE -ne 0){throw "Microsoft Defender native signature update failed (exit $LASTEXITCODE)"}
+          }
           ./tools/scan-release.ps1
       - name: Upload checked build
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
