@@ -58,7 +58,18 @@ namespace ZapretDesktop {
                 StartupRegistration.Set(false,exe);Assert(value==null,"Disabling startup removes owned tray entry");
             }finally{StartupRegistration.TestRead=null;StartupRegistration.TestWrite=null;RemoveFixture(folder);}
         }
-        static void StartupUiTests(MainForm form,Store store,string root) {
+        static void StartupUiTests(string root,string official) {
+            string folder=Path.Combine(root,"tests","fixture-startup-ui-"+Guid.NewGuid().ToString("N"));
+            try {
+                var store=new Store(folder);store.Settings.CheckUpdates=false;store.Settings.AutoAppUpdates=false;store.Save();Copy(official,store.Current);
+                Trust.VerifyEngine(store.Current);
+                using(var form=new MainForm(store,false)) {
+                    form.StartPosition=FormStartPosition.Manual;form.Location=new Point(-2500,-2500);form.Show();Application.DoEvents();
+                    StartupUiScenario(form,store,root);
+                }
+            }finally{RemoveFixture(folder);}
+        }
+        static void StartupUiScenario(MainForm form,Store store,string root) {
             SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
             var flags=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic;
             var runner=(EngineRunner)typeof(MainForm).GetField("runner",flags).GetValue(form);
@@ -73,7 +84,7 @@ namespace ZapretDesktop {
                 Assert(!checkbox.Checked && checkbox.Enabled,"Startup checkbox defaults off based on SCM, not old JSON");
                 Assert(checkbox.Parent.Top<AllControls(form).OfType<Label>().Single(x=>x.Text=="Игровые соединения").Parent.Top,"Startup option stays above game settings and expanded port controls");
                 SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());checkbox.Checked=true;wait();
-                Assert(checkbox.Checked && store.Settings.StartWithWindows && registration==StartupRegistration.Command(Application.ExecutablePath),"Startup checkbox registers tray and persists only after service acknowledges success: checked="+checkbox.Checked+", saved="+store.Settings.StartWithWindows+", changes="+changes+", notices="+String.Join(" | ",AllControls(form).OfType<ProblemNotice>().Select(x=>x.Message.Text)));
+                Assert(checkbox.Checked && store.Settings.StartWithWindows && registration==StartupRegistration.Command(Application.ExecutablePath),"Startup checkbox registers tray and persists only after service acknowledges success: checked="+checkbox.Checked+", saved="+store.Settings.StartWithWindows+", changes="+changes+", notices="+String.Join(" | ",AllControls(form).OfType<ProblemNotice>().Select(x=>x.Message.Text))+", log="+((TextBox)typeof(MainForm).GetField("log",flags).GetValue(form)).Text);
                 Assert(AllControls(form).OfType<Label>().Any(x=>x.Text.Contains("обход запустится при старте Windows")),"Stopped service keeps startup enabled for next boot");
                 Capture(form,Path.Combine(root,"tests","window-startup-enabled.png"));
                 SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());checkbox.Checked=false;wait();Assert(!checkbox.Checked && !store.Settings.StartWithWindows && registration==null,"Disabling checkbox removes both startup registrations");
@@ -300,7 +311,7 @@ namespace ZapretDesktop {
                             pages.SelectedIndex = 0;
                         }
                         using (var image = new Bitmap(form.Width, form.Height)) { form.DrawToBitmap(image, new Rectangle(Point.Empty, form.Size)); image.Save(Path.Combine(root, "tests", "window.png")); }
-                        Assert(form.Controls.Count > 0, "Desktop UI constructed and rendered"); ProblemUiChecks(form,root); DiagnosticLogTests(store,root); InteractiveUiChecks(form,root); ResponsiveScreens(form,root); StartupUiTests(form,store,root);AppUpdateUiTests(store,root); AutomaticUpdateTests(root,official); AppUpdateOutcomeUiTests(store);
+                        Assert(form.Controls.Count > 0, "Desktop UI constructed and rendered"); ProblemUiChecks(form,root); DiagnosticLogTests(store,root); InteractiveUiChecks(form,root); ResponsiveScreens(form,root); StartupUiTests(root,official);AppUpdateUiTests(store,root); AutomaticUpdateTests(root,official); AppUpdateOutcomeUiTests(store);
                         var tabs = FindTabs(form);
                         for (int i = 1; i < tabs.TabPages.Count; i++) {
                             tabs.SelectedIndex = i; form.PerformLayout(); Application.DoEvents();
