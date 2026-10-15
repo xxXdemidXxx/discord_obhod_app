@@ -35,6 +35,55 @@ namespace ZapretDesktop {
             File.WriteAllText(Path.Combine(Path.GetDirectoryName(source),"release-proof.json"),Proof(ShellUpdates.Current,source,source+".config","sha256:"+new string('a',64),123));
             File.WriteAllText(Path.Combine(Path.GetDirectoryName(source),OwnerIdentity.ProofName),BuildProof(source,source+".config"));
         }
+        static void DnsReject(Action action,string message){bool rejected=false;try{action();}catch(Exception ex){if(!(ex is IOException) && !(ex is InvalidDataException) && !(ex is ArgumentException))throw;rejected=true;}Assert(rejected,message);}
+        static string DnsFixture(string address="142.250.74.206",int ttl=180){return "{\"Status\":0,\"Answer\":[{\"type\":5,\"data\":\"youtube-ui.l.google.com\",\"TTL\":10},{\"type\":1,\"data\":\""+address+"\",\"TTL\":"+ttl+"}]}";}
+        static byte[] SocksRequest(string host,int port=443){byte[] name=System.Text.Encoding.ASCII.GetBytes(host);return new byte[]{5,1,0,3,(byte)name.Length}.Concat(name).Concat(new byte[]{(byte)(port/256),(byte)(port%256)}).ToArray();}
+        static async Task<byte[]> ExactAsync(System.IO.Stream stream,int size){var bytes=new byte[size];int offset=0;while(offset<size){int count=await stream.ReadAsync(bytes,offset,size-offset);if(count==0)throw new EndOfStreamException();offset+=count;}return bytes;}
+        static async Task YouTubeDnsTests(string root) {
+            var answer=DnsOverHttps.Parse(DnsFixture());Assert(answer.Addresses.Single().ToString()=="142.250.74.206" && answer.Ttl==180,"DoH parser requires an actual public A answer and retains bounded TTL");
+            DnsReject(()=>DnsOverHttps.Parse("{\"Status\":0,\"Answer\":[{\"type\":5,\"data\":\"alias.example\"}]}"),"CNAME-only response cannot falsely report successful DNS");
+            DnsReject(()=>DnsOverHttps.Parse("{\"Status\":3,\"Answer\":[{\"type\":1,\"data\":\"8.8.8.8\"}]}"),"DNS error status cannot be used as successful resolution");
+            foreach(string ip in new[]{"0.0.0.0","10.0.0.1","127.0.0.1","169.254.1.1","172.16.0.1","192.168.0.1","100.64.0.1","224.0.0.1","198.18.0.1","192.0.2.1","198.51.100.1","203.0.113.1","::1","::ffff:127.0.0.1"})DnsReject(()=>DnsOverHttps.Parse(DnsFixture(ip)),"DoH cannot redirect browser to local or reserved address "+ip);
+            Assert(DnsOverHttps.Parse(DnsFixture("8.8.8.8",99999)).Ttl==300 && DnsOverHttps.Parse(DnsFixture("8.8.8.8",0)).Ttl==0,"DNS caching never exceeds TTL or five minutes");
+            Assert(DnsOverHttps.Host("ПРИМЕР.рф")=="xn--e1afmkfd.xn--p1ai","DoH names normalize IDN without shell interpolation");
+            foreach(string host in new[]{"localhost","127.0.0.1","www.youtube.com/evil","www.youtube.com\r\nproxy","youtube.com --no-sandbox"})DnsReject(()=>DnsOverHttps.Host(host),"Invalid DNS destination rejected: "+host);
+            string profile=Path.Combine(root,"tests","fixture-browser profile");var arguments=Strategy.Split(YouTubeDnsSession.Arguments(profile,12345));
+            Assert(arguments.Contains("--user-data-dir="+profile) && arguments.Contains("--proxy-server=socks5://127.0.0.1:12345") && arguments.Last()=="https://www.youtube.com/","Separate browser receives exact isolated profile, loopback endpoint and fixed URL");
+            Assert(!arguments.Any(x=>x.Contains("ignore-certificate") || x=="--no-sandbox") && arguments.Contains("--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1") && arguments.Contains("--proxy-bypass-list=<-loopback>"),"Browser keeps TLS validation and sandbox and does not resolve destinations via Windows DNS");
+            using(var request=new MemoryStream(SocksRequest("www.youtube.com"))){int port;Assert(YouTubeDnsProxy.Destination(request,out port)=="www.youtube.com" && port==443,"SOCKS destination stays a DNS name until DoH resolution");}
+            using(var request=new MemoryStream(SocksRequest("www.youtube.com",22)))DnsReject(()=>{int port;YouTubeDnsProxy.Destination(request,out port);},"Local relay refuses non-web ports");
+            using(var request=new MemoryStream(new byte[]{5,3,0,1,127,0,0,1,0,80}))DnsReject(()=>{int port;YouTubeDnsProxy.Destination(request,out port);},"Local relay refuses UDP association and literal-IP requests");
+            string resolved=null;int resolutions=0,connections=0;
+            var target=new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback,0);target.Start();int targetPort=((System.Net.IPEndPoint)target.LocalEndpoint).Port;
+            try {
+                using(var proxy=new YouTubeDnsProxy((host,token)=>{resolutions++;resolved=host;return Task.FromResult(DnsOverHttps.Parse(DnsFixture("8.8.8.8")));},async(ip,port)=>{connections++;Assert(ip.ToString()=="8.8.8.8" && port==443,"Tunnel connects only to the exact public DoH answer");var remote=new System.Net.Sockets.TcpClient();await remote.ConnectAsync(System.Net.IPAddress.Loopback,targetPort);return remote;})) {
+                    Assert(proxy.Address.Equals(System.Net.IPAddress.Loopback),"Browser relay listens on loopback only");
+                    var echo=Task.Run(async()=>{using(var peer=await target.AcceptTcpClientAsync()){var stream=peer.GetStream();byte[] data=await ExactAsync(stream,4);await stream.WriteAsync(data,0,data.Length);}});
+                    using(var browser=new System.Net.Sockets.TcpClient()) {
+                        await browser.ConnectAsync(System.Net.IPAddress.Loopback,proxy.Port);var stream=browser.GetStream();await stream.WriteAsync(new byte[]{5,1,0},0,3);Assert((await ExactAsync(stream,2)).SequenceEqual(new byte[]{5,0}),"Real socket negotiates browser SOCKS5 handshake");
+                        byte[] request=SocksRequest("www.youtube.com");await stream.WriteAsync(request,0,request.Length);Assert((await ExactAsync(stream,10))[1]==0,"Browser receives success after real tunnel connection");
+                        byte[] payload=new byte[]{22,3,3,42};await stream.WriteAsync(payload,0,payload.Length);Assert((await ExactAsync(stream,4)).SequenceEqual(payload),"Tunnel passes TLS bytes unchanged without decrypting or replacing certificates");
+                    }
+                    await echo;Assert(resolutions==1 && connections==1 && resolved=="www.youtube.com","Tunnel uses explicit DoH resolver instead of system destination DNS");
+                }
+                int blockedConnections=0;
+                using(var proxy=new YouTubeDnsProxy((host,token)=>Task.FromResult(new DnsAnswer{Addresses=new[]{System.Net.IPAddress.Loopback}}),(ip,port)=>{blockedConnections++;return Task.FromResult(new System.Net.Sockets.TcpClient());}))
+                using(var browser=new System.Net.Sockets.TcpClient()) {
+                    await browser.ConnectAsync(System.Net.IPAddress.Loopback,proxy.Port);var stream=browser.GetStream();await stream.WriteAsync(new byte[]{5,1,0},0,3);await ExactAsync(stream,2);var request=SocksRequest("youtube.com");await stream.WriteAsync(request,0,request.Length);Assert((await ExactAsync(stream,10))[1]!=0 && blockedConnections==0,"Private DNS rebinding is rejected before any outbound connection");
+                }
+            }finally{target.Stop();}
+        }
+        static void YouTubeDnsUiTests(string root) {
+            int launches=0;bool fail=false;
+            using(var dialog=new DnsDiagnosticDialog("DNS Windows: имя не найдено\r\nGoogle DNS через HTTPS: имя найдено\r\nТестовый отчёт; системные настройки не менялись.",()=>{launches++;if(fail)throw new IOException("Тестовый DNS недоступен");return Task.FromResult(0);},_=>{})) {
+                dialog.StartPosition=FormStartPosition.Manual;dialog.Location=new Point(-2500,-2500);dialog.Show();Application.DoEvents();
+                dialog.OpenYouTube.PerformClick();Assert(launches==1 && dialog.Result.Text.Contains("не изменены") && dialog.OpenYouTube.Enabled,"YouTube action reports isolated window without claiming Windows DNS was repaired");
+                Capture(dialog,Path.Combine(root,"tests","window-dns-youtube.png"));
+                fail=true;dialog.OpenYouTube.PerformClick();Assert(launches==2 && dialog.Result.Text.Contains("Настройки Windows не изменены") && dialog.OpenYouTube.Enabled,"Failed browser attempt stays retryable and reports no system mutation");
+                Capture(dialog,Path.Combine(root,"tests","window-dns-youtube-error.png"));
+                dialog.Size=new Size(600,480);dialog.PerformLayout();Application.DoEvents();Assert(dialog.OpenYouTube.Right<=dialog.ClientSize.Width && dialog.Result.Bottom<=dialog.ClientSize.Height,"DNS and YouTube actions fit compact dialog");
+            }
+        }
         static void StartupTests(string root,string official) {
             string folder=Path.Combine(root,"tests","fixture-startup-"+Guid.NewGuid().ToString("N"));
             string snapshot=Path.Combine(folder,"startup-"+Guid.NewGuid().ToString("N"));Copy(official,snapshot);
@@ -236,7 +285,7 @@ namespace ZapretDesktop {
                 var root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".."));
                 var local = Path.GetFullPath(Path.Combine(root, "..", "zapret-discord-youtube-1.10.2"));
                 var official = Path.Combine(root, "downloads", "official-1.10.3", "zapret-discord-youtube-1.10.3");
-                local=official;StartupTests(root,official);SecurityTests(root,official);LegacyMigrationTest(root); DriverRecoveryTests(root); FeedbackAndDriverTests(root,official).GetAwaiter().GetResult(); SelectionTests().GetAwaiter().GetResult(); ServiceProbeTests().GetAwaiter().GetResult(); DomainTests(root); UpdateFeedTests().GetAwaiter().GetResult(); AppUpdateSessionTests(root).GetAwaiter().GetResult(); StageTests(root).GetAwaiter().GetResult(); ShellReplacementTest(root); ShellRollbackTest(root); ShellHandshakeTest(root);
+                local=official;YouTubeDnsTests(root).GetAwaiter().GetResult();StartupTests(root,official);SecurityTests(root,official);LegacyMigrationTest(root); DriverRecoveryTests(root); FeedbackAndDriverTests(root,official).GetAwaiter().GetResult(); SelectionTests().GetAwaiter().GetResult(); ServiceProbeTests().GetAwaiter().GetResult(); DomainTests(root); UpdateFeedTests().GetAwaiter().GetResult(); AppUpdateSessionTests(root).GetAwaiter().GetResult(); StageTests(root).GetAwaiter().GetResult(); ShellReplacementTest(root); ShellRollbackTest(root); ShellHandshakeTest(root);
                 foreach (var engine in new[] {local, official}.Distinct()) {
                     Strategy.ValidateEngine(engine);
                     var profiles = Directory.GetFiles(engine, "general*.bat"); Assert(profiles.Length == 22, "22 upstream profiles expected");
@@ -311,7 +360,7 @@ namespace ZapretDesktop {
                             pages.SelectedIndex = 0;
                         }
                         using (var image = new Bitmap(form.Width, form.Height)) { form.DrawToBitmap(image, new Rectangle(Point.Empty, form.Size)); image.Save(Path.Combine(root, "tests", "window.png")); }
-                        Assert(form.Controls.Count > 0, "Desktop UI constructed and rendered"); ProblemUiChecks(form,root); DiagnosticLogTests(store,root); InteractiveUiChecks(form,root); ResponsiveScreens(form,root); StartupUiTests(root,official);AppUpdateUiTests(store,root); AutomaticUpdateTests(root,official); AppUpdateOutcomeUiTests(store);
+                        Assert(form.Controls.Count > 0, "Desktop UI constructed and rendered"); ProblemUiChecks(form,root); DiagnosticLogTests(store,root); InteractiveUiChecks(form,root); ResponsiveScreens(form,root); StartupUiTests(root,official);YouTubeDnsUiTests(root);AppUpdateUiTests(store,root); AutomaticUpdateTests(root,official); AppUpdateOutcomeUiTests(store);
                         var tabs = FindTabs(form);
                         for (int i = 1; i < tabs.TabPages.Count; i++) {
                             tabs.SelectedIndex = i; form.PerformLayout(); Application.DoEvents();

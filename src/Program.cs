@@ -46,6 +46,7 @@ namespace ZapretDesktop {
         Label[] checkStatuses, checkTimes; Label checkSummary; Button runChecks;
         DarkTabs tabs; bool starting;
         Dashboard dashboard; bool scanning, dnsBusy, pendingExit, stopAfterScan;
+        YouTubeDnsSession youtubeDns; readonly CancellationTokenSource youtubeCancellation=new CancellationTokenSource();
         string activeStrategy,scanStep=""; int checkEpoch; Task manualCheckTask;
         CancellationTokenSource scanCancellation;
         readonly AppUpdateSession appUpdates;
@@ -281,14 +282,19 @@ namespace ZapretDesktop {
             if(dnsBusy || scanning || busy)return;dnsBusy=true;RefreshState();
             try {
                 var report=await DnsDiagnostics.Run(CancellationToken.None);if(IsDisposed)return;Append(report);
-                using(var dialog=new Form{Text="Диагностика DNS",Size=new Size(720,570),StartPosition=FormStartPosition.CenterParent,BackColor=background,ForeColor=Color.White}) {
-                    var text=new TextBox{Text=report,Multiline=true,ReadOnly=true,ScrollBars=ScrollBars.Vertical,Dock=DockStyle.Fill,BackColor=background,ForeColor=muted,Font=new Font("Segoe UI",10),BorderStyle=BorderStyle.None};
-                    var actions=new FlowLayoutPanel{Dock=DockStyle.Bottom,Height=60,Padding=new Padding(10)};
-                    var networks=Button("Подключения Windows",card,0,0,240,38);networks.Click+=(s,e)=>Guard(()=>Open("ncpa.cpl"));
-                    var docs=Button("Инструкция по DNS ↗",card,0,0,230,38);docs.Click+=(s,e)=>Guard(()=>Open("https://developers.google.com/speed/public-dns/docs/using#windows"));
-                    actions.Controls.AddRange(new Control[]{networks,docs});dialog.Padding=new Padding(16);dialog.Controls.Add(text);dialog.Controls.Add(actions);dialog.ShowDialog(this);
-                }
+                using(var dialog=new DnsDiagnosticDialog(report,OpenYouTubeDns,target=>Guard(()=>Open(target))))dialog.ShowDialog(this);
             }catch(Exception ex){if(!IsDisposed)Error(ex);}finally{dnsBusy=false;if(!IsDisposed)RefreshState();}
+        }
+        async Task OpenYouTubeDns() {
+            bool created=youtubeDns==null;
+            if(created)youtubeDns=new YouTubeDnsSession(store.Root);
+            try {
+                await youtubeDns.Open(youtubeCancellation.Token);
+                Append("Открыто отдельное окно YouTube: DNS через HTTPS; DNS Windows и основной профиль браузера не изменены.");
+            }catch(Exception ex) {
+                if(created){youtubeDns.Dispose();youtubeDns=null;}
+                Append("Отдельное окно YouTube: "+ex.GetBaseException().Message);throw;
+            }
         }
         Task Install(){return InstallCore(false);}
         async Task InstallCore(bool automatic) {
@@ -395,6 +401,7 @@ namespace ZapretDesktop {
         }
         protected override void Dispose(bool disposing) {
             if (disposing) {
+                youtubeCancellation.Cancel();if(youtubeDns!=null)youtubeDns.Dispose();
                 if (checkCancellation != null) checkCancellation.Cancel();
                 if (scanCancellation != null) scanCancellation.Cancel();
                 if (timer != null) { timer.Stop(); timer.Dispose(); }

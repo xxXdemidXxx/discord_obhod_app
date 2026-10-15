@@ -1,5 +1,6 @@
-﻿using System;
+using System;
 using System.Collections;
+using System.IO;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
@@ -30,14 +31,14 @@ namespace ZapretDesktop {
             using(var handler=new HttpClientHandler{UseProxy=false}) using(var client=new HttpClient(handler){Timeout=TimeSpan.FromSeconds(7)}) {
                 try {
                     using(var response=await client.GetAsync("https://dns.google/resolve?name=www.youtube.com&type=A",token)) {
-                        response.EnsureSuccessStatusCode(); var json=new JavaScriptSerializer().Deserialize<Dictionary<string,object>>(await response.Content.ReadAsStringAsync());
-                        dohOk=Convert.ToInt32(json["Status"])==0 && json.ContainsKey("Answer");
+                        response.EnsureSuccessStatusCode();
+                        try{dohOk=DnsOverHttps.Parse(await response.Content.ReadAsStringAsync()).Addresses.Length>0;}catch(IOException){dohOk=false;}
                         report.AppendLine("Google DNS через HTTPS: "+(dohOk?"имя найдено":"имя не найдено"));
                     }
                 } catch(Exception ex){if(token.IsCancellationRequested)throw new OperationCanceledException(token);report.AppendLine("Google DNS через HTTPS: "+ex.GetBaseException().Message);}
             }
             report.AppendLine();
-            if(!systemOk && dohOk) report.AppendLine("Windows не определяет имя, а Google DoH определяет. Проверьте DNS вашего сетевого подключения. Перебор DPI-стратегий сам по себе не гарантирует исправление DNS.");
+            if(!systemOk && dohOk) report.AppendLine("Windows не определяет имя, а Google DoH определяет. Попробуйте «Открыть YouTube в отдельном окне»: оно использует DNS через HTTPS без изменения Windows. Перебор DPI-стратегий сам по себе не исправляет DNS.");
             else if(systemOk) report.AppendLine("Сейчас Windows определяет имя YouTube. Повторите HTTPS-проверку: ошибка могла быть временной. Если соединение не проходит, попробуйте автоподбор стратегий.");
             else report.AppendLine("Имя не удалось проверить обоими способами. Проверьте интернет и DNS сетевого подключения.");
             report.AppendLine("\r\nДля настройки DNS Windows откройте подключения: свойства Wi-Fi/Ethernet → IPv4 → DNS. Сначала сохраните прежние значения. Google Public DNS: 8.8.8.8 и 8.8.4.4. Возможность доступа зависит от сети.");
