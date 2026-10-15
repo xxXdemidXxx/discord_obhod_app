@@ -15,7 +15,7 @@ namespace ZapretDesktop {
         readonly object gate=new object();readonly AutoResetEvent response=new AutoResetEvent(false);
         Dictionary<string,object> reply;volatile bool running,connected,ready;Exception failure;volatile string driverFailure;
         public event Action<string> Log;
-        StartupState startup=new StartupState();
+        volatile StartupState startup=new StartupState();
         internal bool StartupEnabled {get{return startup.Owned;}}
         internal string StartupStrategy {get{return startup.Strategy;}}
         internal string StartupEngine {get{return startup.Engine;}}

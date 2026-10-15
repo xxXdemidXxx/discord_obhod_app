@@ -7,10 +7,29 @@ using System.Windows.Forms;
 namespace ZapretDesktop {
     public static class Theme {
         public static readonly float SystemScale=ReadScale();static float ReadScale(){using(var g=Graphics.FromHwnd(IntPtr.Zero))return g.DpiX/96f;}
-        public static readonly Color Background=Color.FromArgb(49,51,56), Surface=Color.FromArgb(43,45,49), Input=Color.FromArgb(30,31,34), Border=Color.FromArgb(63,65,71), Text=Color.FromArgb(242,243,245), Muted=Color.FromArgb(181,186,193), Accent=Color.FromArgb(88,101,242), Success=Color.FromArgb(59,165,92), Warning=Color.FromArgb(240,178,50), Danger=Color.FromArgb(237,66,69);
+        public static Color Background=Color.FromArgb(49,51,56), Surface=Color.FromArgb(43,45,49), Input=Color.FromArgb(30,31,34), Border=Color.FromArgb(63,65,71), Text=Color.FromArgb(242,243,245), Muted=Color.FromArgb(181,186,193), Accent=Color.FromArgb(88,101,242), Success=Color.FromArgb(59,165,92), Warning=Color.FromArgb(240,178,50), Danger=Color.FromArgb(237,66,69);
+        public static Color ButtonSurface=Color.FromArgb(64,66,73);
+        public static string Current="graphite";
+        internal static readonly VisualPalette[] Presets={
+            new VisualPalette("graphite","Графит",Color.FromArgb(49,51,56),Color.FromArgb(43,45,49),Color.FromArgb(30,31,34),Color.FromArgb(63,65,71),Color.FromArgb(242,243,245),Color.FromArgb(181,186,193),Color.FromArgb(88,101,242),Color.FromArgb(64,66,73)),
+            new VisualPalette("midnight","Полночь",Color.FromArgb(20,27,43),Color.FromArgb(26,35,53),Color.FromArgb(13,19,32),Color.FromArgb(49,64,88),Color.FromArgb(236,242,252),Color.FromArgb(166,185,211),Color.FromArgb(91,135,246),Color.FromArgb(43,57,79)),
+            new VisualPalette("obsidian","Обсидиан",Color.FromArgb(18,21,23),Color.FromArgb(25,30,32),Color.FromArgb(11,14,16),Color.FromArgb(47,58,60),Color.FromArgb(235,245,242),Color.FromArgb(163,186,180),Color.FromArgb(42,151,132),Color.FromArgb(40,54,53))
+        };
+        internal static VisualPalette Palette(string id){return Presets.FirstOrDefault(p=>p.Id==id)??Presets[0];}
+        internal static void Use(string id){var p=Palette(id);Current=p.Id;Background=p.Background;Surface=p.Surface;Input=p.Input;Border=p.Border;Text=p.Text;Muted=p.Muted;Accent=p.Accent;ButtonSurface=p.Button;}
+        internal static void Recolor(Control root,VisualPalette previous){
+            var old=new[]{previous.Background,previous.Surface,previous.Input,previous.Border,previous.Text,previous.Muted,previous.Accent,previous.Button};
+            var next=new[]{Background,Surface,Input,Border,Text,Muted,Accent,ButtonSurface};
+            RecolorControl(root,old,next);root.Invalidate(true);
+        }
+        static Color Map(Color color,Color[] old,Color[] next){if(color==Color.Transparent)return color;for(int i=0;i<old.Length;i++)if(color.ToArgb()==old[i].ToArgb())return next[i];return color;}
+        static void RecolorControl(Control control,Color[] old,Color[] next){
+            control.BackColor=Map(control.BackColor,old,next);control.ForeColor=Map(control.ForeColor,old,next);
+            foreach(Control child in control.Controls)RecolorControl(child,old,next);
+        }
         public static GraphicsPath Round(Rectangle r,int radius) {int d=radius*2;var p=new GraphicsPath();p.AddArc(r.X,r.Y,d,d,180,90);p.AddArc(r.Right-d,r.Y,d,d,270,90);p.AddArc(r.Right-d,r.Bottom-d,d,d,0,90);p.AddArc(r.X,r.Bottom-d,d,d,90,90);p.CloseFigure();return p;}
         public static Label Label(string text,float size=10,bool bold=false) {return new Label{Text=text,AutoEllipsis=true,ForeColor=Theme.Text,BackColor=Color.Transparent,Font=new Font("Segoe UI",size,bold?FontStyle.Bold:FontStyle.Regular)};}
-        public static FlatAction Button(string text,bool primary=false) {return new FlatAction{Text=text,Size=new Size(180,40),BackColor=primary?Accent:Color.FromArgb(64,66,73),ForeColor=Theme.Text,FlatStyle=FlatStyle.Flat,Cursor=Cursors.Hand,Font=new Font("Segoe UI",10)};}
+        public static FlatAction Button(string text,bool primary=false) {return new FlatAction{Text=text,Size=new Size(180,40),BackColor=primary?Accent:ButtonSurface,ForeColor=Theme.Text,FlatStyle=FlatStyle.Flat,Cursor=Cursors.Hand,Font=new Font("Segoe UI",10)};}
         public static string StrategyName(string name) {return name=="general.bat"?"Основная · general":name.Replace("general (","").Replace(").bat","").Replace(".bat","");}
     }
     public sealed class SurfacePanel : Panel {

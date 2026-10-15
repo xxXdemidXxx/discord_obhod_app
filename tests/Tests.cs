@@ -84,6 +84,41 @@ namespace ZapretDesktop {
                 dialog.Size=new Size(600,480);dialog.PerformLayout();Application.DoEvents();Assert(dialog.OpenYouTube.Right<=dialog.ClientSize.Width && dialog.Result.Bottom<=dialog.ClientSize.Height,"DNS and YouTube actions fit compact dialog");
             }
         }
+        static void SettingsAndHelpTests(MainForm form,Store store,string root){
+            var flags=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic;var tabs=FindTabs(form);var oldSize=form.Size;
+            var help=AllControls(form).OfType<HelpGuide>().Single();
+            foreach(string topic in new[]{"browser","windows"}){
+                string requested=null;using(var dialog=new DnsDiagnosticDialog("Тестовый отчёт DNS",()=>Task.FromResult(0),value=>requested=value)){
+                    dialog.StartPosition=FormStartPosition.Manual;dialog.Location=new Point(-2500,-2500);dialog.Show();Application.DoEvents();
+                    AllControls(dialog).OfType<Button>().Single(b=>b.Name==(topic=="browser"?"DnsHelpBrowser":"DnsHelpWindows")).PerformClick();
+                    Assert(requested==topic && !dialog.Visible,"DNS help button closes dialog and selects exact guide: "+topic);
+                }
+                typeof(MainForm).GetMethod("ShowHelp",flags).Invoke(form,new object[]{requested});Application.DoEvents();
+                Assert(tabs.SelectedIndex==5 && help.Topic==topic,"DNS navigation opens Help with the requested guide: "+topic);
+                Capture(form,Path.Combine(root,"tests","window-help-"+topic+".png"));
+            }
+            Assert(!AllControls(help).OfType<Label>().Any(l=>l.Text.Contains("Крестик") || l.Text.Contains("IP и страна") || l.Text.Contains("Настройки игр")),"Help omits removed reference text and keeps task instructions");
+            foreach(var preset in Theme.Presets){
+                tabs.SelectedIndex=1;Application.DoEvents();AllControls(form).OfType<Button>().Single(b=>b.Name=="Theme-"+preset.Id).PerformClick();Application.DoEvents();
+                Assert(Theme.Current==preset.Id && form.BackColor==preset.Background && new Store(store.Root).Settings.VisualTheme==preset.Id,"Theme applies immediately and survives settings reload: "+preset.Id);
+                foreach(var size in new[]{new Size(940,690),new Size(1100,830)}){
+                    form.Size=size;form.PerformLayout();Application.DoEvents();
+                    var choices=AllControls(form).OfType<ThemeChoice>().ToArray();Assert(choices.All(c=>c.Right<=c.Parent.ClientSize.Width && c.Bottom<=c.Parent.ClientSize.Height) && !choices[0].Bounds.IntersectsWith(choices[1].Bounds),"Theme cards fit Settings at "+size);
+                    if(size.Width==1100)Capture(form,Path.Combine(root,"tests","window-theme-"+preset.Id+".png"));
+                }
+            }
+            foreach(string topic in new[]{"start","browser","windows"}){
+                typeof(MainForm).GetMethod("ShowHelp",flags).Invoke(form,new object[]{topic});form.Size=new Size(940,690);Application.DoEvents();
+                Assert(AllControls(help).Where(c=>c is Label && c.Parent is SurfacePanel).All(c=>c.Right<=c.Parent.Width && c.Bottom<=c.Parent.Height),"Guide content fits compact window: "+topic);
+            }
+            Assert(Theme.Palette("unknown").Id=="graphite" && Theme.Palette(null).Id=="graphite","Unknown or missing saved theme falls back safely");
+            tabs.SelectedIndex=1;AllControls(form).OfType<Button>().Single(b=>b.Name=="Theme-graphite").PerformClick();
+            using(var restored=new MainForm(new Store(store.Root),false)){Assert(restored.BackColor==Theme.Background,"Reopened window uses persisted palette");}
+            tabs.SelectedIndex=4;AllControls(form).OfType<Button>().Single(b=>b.Name=="AdvancedGames").PerformClick();Application.DoEvents();
+            Assert(AllControls(form).OfType<DarkSelect>().Single(c=>c.Items.Contains("Только TCP")).Visible,"Games are reachable in Advanced");Capture(form,Path.Combine(root,"tests","window-advanced-games.png"));
+            AllControls(form).OfType<Button>().Single(b=>b.Name=="AdvancedSites").PerformClick();Application.DoEvents();Assert(AllControls(form).OfType<DomainEditor>().Single().Visible,"Site lists remain reachable in Advanced");
+            form.Size=oldSize;tabs.SelectedIndex=0;
+        }
         static void StartupTests(string root,string official) {
             string folder=Path.Combine(root,"tests","fixture-startup-"+Guid.NewGuid().ToString("N"));
             string snapshot=Path.Combine(folder,"startup-"+Guid.NewGuid().ToString("N"));Copy(official,snapshot);
@@ -124,21 +159,25 @@ namespace ZapretDesktop {
             var runner=(EngineRunner)typeof(MainForm).GetField("runner",flags).GetValue(form);
             var checkbox=AllControls(form).OfType<CheckBox>().Single(x=>x.Text=="Запускать при старте Windows");
             var state=new StartupState();string registration=null;bool denied=false;int changes=0;var oldConflict=runner.ConflictCheck;runner.ConflictCheck=()=>false;AllControls(form).OfType<DomainEditor>().Single().Discard();
-            StartupService.TestRead=_=>state;StartupRegistration.TestRead=()=>registration;StartupRegistration.TestWrite=value=>registration=value;
-            runner.TestStartupChange=(enabled,engine,strategy)=>{changes++;if(denied)throw new System.ComponentModel.Win32Exception(1223);state=new StartupState{Installed=enabled,Owned=enabled,Running=false,Engine=Path.GetFileName(engine),Strategy=strategy};};
+            int reads=0;StartupService.TestRead=_=>{reads++;return state;};StartupRegistration.TestRead=()=>registration;StartupRegistration.TestWrite=value=>registration=value;
+            var acknowledge=new ManualResetEventSlim(false);bool delay=true;
+            runner.TestStartupChange=(enabled,engine,strategy)=>{changes++;if(delay && !acknowledge.Wait(5000))throw new TimeoutException("test acknowledgement");if(denied)throw new System.ComponentModel.Win32Exception(1223);state=new StartupState{Installed=enabled,Owned=enabled,Running=false,Engine=Path.GetFileName(engine),Strategy=strategy};};
             Action refresh=()=>typeof(MainForm).GetMethod("RefreshState",flags).Invoke(form,null);
             Action wait=()=>{var watch=Stopwatch.StartNew();while((bool)typeof(MainForm).GetField("busy",flags).GetValue(form) && watch.ElapsedMilliseconds<10000){Application.DoEvents();Thread.Sleep(10);}Assert(!(bool)typeof(MainForm).GetField("busy",flags).GetValue(form),"Startup UI operation completes without blocking window");};
             try {
                 FindTabs(form).SelectedIndex=1;refresh();Application.DoEvents();
                 Assert(!checkbox.Checked && checkbox.Enabled,"Startup checkbox defaults off based on SCM, not old JSON");
-                Assert(checkbox.Parent.Top<AllControls(form).OfType<Label>().Single(x=>x.Text=="Игровые соединения").Parent.Top,"Startup option stays above game settings and expanded port controls");
-                SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());checkbox.Checked=true;wait();
+                Assert(checkbox is ToggleOption && AllControls(FindTabs(form).TabPages[1]).Contains(checkbox) && !AllControls(FindTabs(form).TabPages[1]).Contains(AllControls(form).OfType<Label>().Single(x=>x.Text=="Игровые соединения")),"Styled startup switch lives in Settings, games live separately in Advanced");
+                int initialReads=reads;for(int i=0;i<10;i++)refresh();Assert(reads==initialReads,"UI refresh never polls Windows service synchronously");
+                SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());checkbox.Checked=true;
+                try{refresh();Application.DoEvents();Assert(checkbox.Checked && !checkbox.Enabled && !store.Settings.StartWithWindows,"Pending startup switch keeps requested position, disables repeat clicks and does not save before acknowledgement");Assert(AllControls(form).OfType<Label>().Any(x=>x.Text.StartsWith("Включаем…")),"Pending startup operation has a clear inline progress message");}finally{delay=false;acknowledge.Set();}wait();
                 Assert(checkbox.Checked && store.Settings.StartWithWindows && registration==StartupRegistration.Command(Application.ExecutablePath),"Startup checkbox registers tray and persists only after service acknowledges success: checked="+checkbox.Checked+", saved="+store.Settings.StartWithWindows+", changes="+changes+", notices="+String.Join(" | ",AllControls(form).OfType<ProblemNotice>().Select(x=>x.Message.Text))+", log="+((TextBox)typeof(MainForm).GetField("log",flags).GetValue(form)).Text);
                 Assert(AllControls(form).OfType<Label>().Any(x=>x.Text.Contains("обход запустится при старте Windows")),"Stopped service keeps startup enabled for next boot");
                 Capture(form,Path.Combine(root,"tests","window-startup-enabled.png"));
                 SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());checkbox.Checked=false;wait();Assert(!checkbox.Checked && !store.Settings.StartWithWindows && registration==null,"Disabling checkbox removes both startup registrations");
                 denied=true;SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());checkbox.Checked=true;wait();Assert(!checkbox.Checked && registration==null && !store.Settings.StartWithWindows,"Declined UAC restores checkbox and previous user logon registration");
                 Assert(changes==3,"Each checkbox action issues a single service request");
+                Assert(AllControls(form).OfType<Label>().Any(x=>x.Text.Contains("Изменение отменено")),"Cancelled Windows prompt leaves an understandable inline status");
                 state=new StartupState{Installed=true,Owned=true,Running=true,Engine=store.Settings.Engine,Strategy=store.Settings.Strategy};
                 using(var trayForm=new MainForm(store,false,startInTray:true)) {
                     trayForm.Show();Application.DoEvents();
@@ -360,7 +399,7 @@ namespace ZapretDesktop {
                             pages.SelectedIndex = 0;
                         }
                         using (var image = new Bitmap(form.Width, form.Height)) { form.DrawToBitmap(image, new Rectangle(Point.Empty, form.Size)); image.Save(Path.Combine(root, "tests", "window.png")); }
-                        Assert(form.Controls.Count > 0, "Desktop UI constructed and rendered"); ProblemUiChecks(form,root); DiagnosticLogTests(store,root); InteractiveUiChecks(form,root); ResponsiveScreens(form,root); StartupUiTests(root,official);YouTubeDnsUiTests(root);AppUpdateUiTests(store,root); AutomaticUpdateTests(root,official); AppUpdateOutcomeUiTests(store);
+                        Assert(form.Controls.Count > 0, "Desktop UI constructed and rendered"); ProblemUiChecks(form,root); DiagnosticLogTests(store,root); InteractiveUiChecks(form,root); ResponsiveScreens(form,root); StartupUiTests(root,official);YouTubeDnsUiTests(root);SettingsAndHelpTests(form,store,root);AppUpdateUiTests(store,root); AutomaticUpdateTests(root,official); AppUpdateOutcomeUiTests(store);
                         var tabs = FindTabs(form);
                         for (int i = 1; i < tabs.TabPages.Count; i++) {
                             tabs.SelectedIndex = i; form.PerformLayout(); Application.DoEvents();
@@ -670,7 +709,8 @@ namespace ZapretDesktop {
                 Assert(dashboard.History.Bottom<=dashboard.Height+1 && dashboard.Apply.Right<=dashboard.Width && dashboard.Dns.Right<=dashboard.Width,"Dashboard fits resized window "+size);
                 using(var picture=new Bitmap(form.Width,form.Height)){form.DrawToBitmap(picture,new Rectangle(Point.Empty,form.Size));picture.Save(Path.Combine(root,"tests","window-"+(size.Width<1000?"compact":"wide")+".png"));}
             }
-            form.Size=original;tabs.SelectedIndex=tabs.TabPages.FindIndex(x=>x.Text=="Настройки");
+            form.Size=original;tabs.SelectedIndex=tabs.TabPages.FindIndex(x=>x.Text=="Дополнительно");
+            AllControls(form).OfType<Button>().Single(x=>x.Name=="AdvancedGames").PerformClick();
             AllControls(form).OfType<Button>().First(x=>x.Text.StartsWith("Настроить порты")).PerformClick();Application.DoEvents();
             using(var picture=new Bitmap(form.Width,form.Height)){form.DrawToBitmap(picture,new Rectangle(Point.Empty,form.Size));picture.Save(Path.Combine(root,"tests","window-ports.png"));}
             tabs.SelectedIndex=0;

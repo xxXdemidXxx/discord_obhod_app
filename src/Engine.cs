@@ -32,6 +32,7 @@ namespace ZapretDesktop {
         public bool AutoAppUpdates = true;
         public bool AutoInstallShell = false;
         public bool AutoInstallCore = false; public bool StartWithWindows = false;
+        public string VisualTheme = "graphite";
     }
 
     public sealed class Store {

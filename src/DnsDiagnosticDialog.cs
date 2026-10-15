@@ -8,7 +8,7 @@ namespace ZapretDesktop {
         internal readonly Button OpenYouTube=Theme.Button("Открыть YouTube в отдельном окне",true);
         internal readonly Label Result=Theme.Label("",9);
         internal readonly TextBox Report;
-        internal DnsDiagnosticDialog(string report,Func<Task> launch,Action<string> open) {
+        internal DnsDiagnosticDialog(string report,Func<Task> launch,Action<string> helpRequested) {
             Func<int,int> s=n=>(int)Math.Round(n*Theme.SystemScale);
             Text="DNS и YouTube";BackColor=Theme.Background;ForeColor=Theme.Text;Font=new Font("Segoe UI",10);AutoScaleMode=AutoScaleMode.None;
             StartPosition=FormStartPosition.CenterParent;Size=new Size(s(780),s(690));MinimumSize=new Size(s(600),s(480));Padding=new Padding(s(18));
@@ -19,8 +19,9 @@ namespace ZapretDesktop {
             var help=Theme.Label("Только это окно использует DNS через HTTPS и отдельный профиль Edge/Chrome.\nНастройки Windows и основного браузера не меняются.\nДля этого окна ByPass должен работать; стратегию обхода оставьте включённой.",9);help.ForeColor=Theme.Muted;help.Dock=DockStyle.Fill;
             OpenYouTube.Dock=DockStyle.Fill;OpenYouTube.Margin=new Padding(0,s(3),0,s(3));
             var links=new FlowLayoutPanel{Dock=DockStyle.Fill,Padding=Padding.Empty};
-            Button networks=Theme.Button("Подключения Windows"),docs=Theme.Button("Инструкция по DNS ↗");networks.Size=new Size(s(230),s(36));docs.Size=new Size(s(230),s(36));
-            networks.Click+=(sender,e)=>open("ncpa.cpl");docs.Click+=(sender,e)=>open("https://developers.google.com/speed/public-dns/docs/using#windows");links.Controls.AddRange(new Control[]{networks,docs});
+            Button browser=Theme.Button("Помощь: DNS в браузере"),windows=Theme.Button("Помощь: DNS в Windows");browser.Name="DnsHelpBrowser";windows.Name="DnsHelpWindows";browser.Size=new Size(s(245),s(36));windows.Size=new Size(s(245),s(36));
+            browser.Click+=(sender,e)=>{helpRequested("browser");Close();};windows.Click+=(sender,e)=>{helpRequested("windows");Close();};links.Controls.AddRange(new Control[]{browser,windows});
+            links.WrapContents=false;links.Resize+=(sender,e)=>{int width=Math.Max(1,(links.ClientSize.Width-s(16))/2);browser.Width=windows.Width=width;};
             Result.Dock=DockStyle.Fill;Result.ForeColor=Theme.Muted;
             OpenYouTube.Click+=async(sender,e)=>{
                 OpenYouTube.Enabled=false;Result.ForeColor=Theme.Muted;Result.Text="Проверяем DNS через HTTPS и открываем отдельное окно…";

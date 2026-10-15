@@ -15,3 +15,5 @@ discord_obhod_app/
 *.private.xml
 *.key-backup.json
 
+
+tests/ui-review-*/

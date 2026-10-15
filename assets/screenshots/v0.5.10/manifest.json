@@ -1,0 +1,78 @@
+{
+  "version": "0.5.10",
+  "description": "Реальные WinForms-компоненты в автономном UI-тесте. DNS, служба и данные сценария тестовые; снимки не подтверждают сетевой доступ или подпись production EXE.",
+  "images": [
+    {
+      "capturedAt": "2026-10-15T19:06:02.2120451Z",
+      "testContent": true,
+      "sha256": "3f2225322b056dab18b0d5a43a20d0ea4c1a25f73f398e5f1064d58475652667",
+      "caption": "Настройки: автозапуск и тема Графит",
+      "file": "settings-graphite.png",
+      "method": "WinForms DrawToBitmap"
+    },
+    {
+      "capturedAt": "2026-10-15T19:06:02.2560586Z",
+      "testContent": true,
+      "sha256": "32eb4b4a815d31f54d2fccfce02bacdecf88052f7b0adeb154f69662d84bcaf5",
+      "caption": "Настройки: тема Полночь",
+      "file": "settings-midnight.png",
+      "method": "WinForms DrawToBitmap"
+    },
+    {
+      "capturedAt": "2026-10-15T19:06:02.3084113Z",
+      "testContent": true,
+      "sha256": "d56397d7cf036ca8ca3bfc4096433d3581945290ee2ef5b383cc30ceefe60f7a",
+      "caption": "Настройки: тема Обсидиан",
+      "file": "settings-obsidian.png",
+      "method": "WinForms DrawToBitmap"
+    },
+    {
+      "capturedAt": "2026-10-15T19:06:02.0816347Z",
+      "testContent": true,
+      "sha256": "c5d53e408d93d1885a91f691b6fbd1cc305461400eee4b4273f05fdd1d0be16d",
+      "caption": "Короткая инструкция DNS для браузера",
+      "file": "help-browser.png",
+      "method": "WinForms DrawToBitmap"
+    },
+    {
+      "capturedAt": "2026-10-15T19:06:02.1572623Z",
+      "testContent": true,
+      "sha256": "d7a27c47918a9a1f24909d8c601dd63feada9bb7d491a34b7790db3709802084",
+      "caption": "Короткая инструкция DNS для Windows",
+      "file": "help-windows.png",
+      "method": "WinForms DrawToBitmap"
+    },
+    {
+      "capturedAt": "2026-10-15T19:06:02.4224630Z",
+      "testContent": true,
+      "sha256": "8431cca426dc36d403811b865ddd0fe46c05940650514da0c853129b607e1d9d",
+      "caption": "Игровые соединения в Дополнительно; раскрыты порты",
+      "file": "advanced-games.png",
+      "method": "WinForms DrawToBitmap"
+    },
+    {
+      "capturedAt": "2026-10-15T19:06:01.9603324Z",
+      "testContent": true,
+      "sha256": "49afc4d6aad13b9e32d77404307c6f4eaa20962eaa8d9cedc70eb7148b468153",
+      "caption": "Диагностика DNS: тестовый отчёт и переходы к помощи",
+      "file": "dns-help.png",
+      "method": "WinForms DrawToBitmap"
+    },
+    {
+      "capturedAt": "2026-10-15T18:58:34.6745174Z",
+      "testContent": true,
+      "sha256": "4aefba00057cce334f4c599621f752cc83a728abc9dac8090ca947a7dd2d8201",
+      "caption": "До изменений: настройки 0.5.9",
+      "file": "before-settings.png",
+      "method": "WinForms DrawToBitmap"
+    },
+    {
+      "capturedAt": "2026-10-15T18:58:34.9022293Z",
+      "testContent": true,
+      "sha256": "8661dcb2b2e8313ebfaa7f98d46d2896ded0e82de929e28ab1bc699326acb126",
+      "caption": "До изменений: помощь 0.5.9",
+      "file": "before-help.png",
+      "method": "WinForms DrawToBitmap"
+    }
+  ]
+}

@@ -40,7 +40,7 @@ namespace ZapretDesktop {
         [DllImport("user32.dll")] static extern bool ReleaseCapture();
         [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr handle, int message, IntPtr wParam, IntPtr lParam);
         readonly Store store; readonly StrategyFeedback strategyFeedback; readonly EngineRunner runner = new EngineRunner(); readonly Updater updater;
-        readonly Color background = Theme.Background, card = Theme.Surface, muted = Theme.Muted, accent = Theme.Accent;
+        Color background {get{return Theme.Background;}} Color card {get{return Theme.Surface;}} Color muted {get{return Theme.Muted;}} Color accent {get{return Theme.Accent;}}
         Label state, subtitle, version, updateText; Button connect, install, rollback, check;
         DarkSelect profiles, categories, games; CheckBox autoCheck; TextBox tcp, udp, log;
         Label[] checkStatuses, checkTimes; Label checkSummary; Button runChecks;
@@ -56,6 +56,7 @@ namespace ZapretDesktop {
         Label ownerMark;
         AppUpdateCard appUpdateCard; Button coreManual; CheckBox autoShell; bool updateOutcome;
         CheckBox autoInstallShell,autoInstallCore,startWindows; Label startupStatus;
+        bool startupChanging,startupPolling; string startupMessage="",startupReadError="";
         bool previouslyOn;
         CancellationTokenSource checkCancellation; bool testing, checkingUpdates;
         NotifyIcon tray; System.Windows.Forms.Timer timer;
@@ -63,6 +64,7 @@ namespace ZapretDesktop {
         public MainForm(Store store, bool start, bool auto = false, bool restoreConnection = false, bool fullScan = false, ShellUpdates shellUpdates = null, Func<string,string,bool> updateConfirmation = null,Updater coreUpdates=null, bool startInTray=false) {
             this.store = store; strategyFeedback=new StrategyFeedback(store); updater = coreUpdates??new Updater(store);appUpdates=new AppUpdateSession(shellUpdates??new ShellUpdates());
             confirmUpdate=updateConfirmation??((title,message)=>MessageBox.Show(this,message,title,MessageBoxButtons.YesNo,MessageBoxIcon.Question,MessageBoxDefaultButton.Button2)==DialogResult.Yes);
+            Theme.Use(store.Settings.VisualTheme);
             runner.RefreshStartup();
             activeStrategy = runner.StartupEnabled?runner.StartupStrategy:store.Settings.Strategy;
             BuildInterface();if(startInTray){Opacity=0;ShowInTaskbar=false;Shown+=(s,e)=>{Hide();Opacity=1;};}
@@ -70,7 +72,7 @@ namespace ZapretDesktop {
             tray = new NotifyIcon { Icon = Icon, Text = "ByPass — выключен", Visible = true };
             var menu = new ContextMenuStrip(); menu.Items.Add("Открыть", null, (s,e) => Restore()); menu.Items.Add("Включить / выключить", null, async (s,e) => await Toggle()); menu.Items.Add("Выход", null, (s,e) => Exit()); tray.ContextMenuStrip = menu; tray.DoubleClick += (s,e) => Restore();
             runner.Log += Append; timer = new System.Windows.Forms.Timer { Interval = 800 };
-            timer.Tick += (s,e) => RefreshState();timer.Start();
+            timer.Tick += async (s,e) => await PollStartup();timer.Start();
             appUpdates.Changed+=AppUpdateChanged;
             LoadSettings();
             RenderOwner(OwnerIdentity.Current(Application.ExecutablePath));
@@ -126,22 +128,45 @@ namespace ZapretDesktop {
                 startWindows.Checked=runner.StartupEnabled;
             } finally { loading = false; RefreshState(); }
         }
+        async Task PollStartup(){
+            if(IsDisposed || startupPolling || busy || starting || scanning)return;
+            startupPolling=true;
+            try{await Task.Run(()=>runner.RefreshStartup());startupReadError="";}
+            catch(Exception ex){startupReadError="Не удалось проверить автозапуск. Повторите попытку.";Trace.TraceError(ex.Message);}
+            finally{startupPolling=false;if(!IsDisposed)RefreshState();}
+        }
         async Task SetWindowsStartup() {
             if(loading)return;
-            bool enabled=startWindows.Checked,reconnect=runner.Running,failed=false,changed=false;string previousRegistration=StartupRegistration.Read();
-            string strategy=reconnect?activeStrategy:(profiles.SelectedItem==null?store.Settings.Strategy:profiles.SelectedItem.ToString());
-            busy=true;RefreshState();
+            if(busy || starting || scanning || startupChanging){RefreshState();return;}
+            bool enabled=startWindows.Checked,reconnect=runner.Running,changed=false,registrationChanged=false;
+            string previousRegistration=null;
+            string engine=store.Current,strategy=reconnect?activeStrategy:(profiles.SelectedItem==null?store.Settings.Strategy:profiles.SelectedItem.ToString());
+            startupChanging=true;busy=true;startupMessage="";RefreshState();
             try {
-                Trust.VerifyEngine(store.Current);Strategy.Arguments(store.Current,strategy);
-                await StopChecks();
-                if(enabled && reconnect)await Task.Run(()=>runner.Stop());
-                StartupRegistration.Set(enabled,Application.ExecutablePath);await Task.Run(()=>runner.SetStartup(enabled,store.Current,strategy));changed=true;
-                store.Settings.StartWithWindows=runner.StartupEnabled;store.Settings.Strategy=strategy;store.Save();activeStrategy=strategy;
-                Append(enabled?"Запуск при старте Windows включён. При выходе из ByPass обход продолжит работать.":"Запуск при старте Windows выключен.");
-                if(!enabled && reconnect)await StartEngine(strategy,CancellationToken.None);
-            }catch(Exception ex){failed=true;if(!changed){try{StartupRegistration.Write(previousRegistration);}catch(Exception registrationError){Append(registrationError.Message);}}Error(ex);}
-            finally{busy=false;if(!IsDisposed)RefreshState();}
-            if(failed && reconnect && !runner.Running){try{await StartEngine(strategy,CancellationToken.None);}catch(Exception restart){Error(restart);}}
+                Exception failure=null;
+                try {
+                    await StopChecks();
+                    await Task.Run(()=>{
+                        if(enabled){Trust.VerifyEngine(engine);Strategy.Arguments(engine,strategy);}
+                        previousRegistration=StartupRegistration.Read();
+                        if(enabled && reconnect)runner.Stop();
+                        StartupRegistration.Set(enabled,Application.ExecutablePath);registrationChanged=true;
+                        runner.SetStartup(enabled,engine,strategy);changed=true;
+                    });
+                    store.Settings.StartWithWindows=runner.StartupEnabled;store.Settings.Strategy=strategy;store.Save();activeStrategy=strategy;
+                    Append(enabled?"Запуск при старте Windows включён. При выходе из ByPass обход продолжит работать.":"Запуск при старте Windows выключен.");
+                    if(!enabled && reconnect)await StartEngine(strategy,CancellationToken.None);
+                }catch(Exception ex){failure=ex;}
+                if(failure!=null){
+                    if(!changed && registrationChanged){
+                        try{await Task.Run(()=>StartupRegistration.Write(previousRegistration));}catch(Exception rollbackError){Append(rollbackError.Message);}
+                    }
+                    var cancelled=failure.GetBaseException() as System.ComponentModel.Win32Exception;
+                    if(cancelled!=null && cancelled.NativeErrorCode==1223){startupMessage="Изменение отменено · автозапуск "+(runner.StartupEnabled?"включён":"выключен");Append(startupMessage);}
+                    else{startupMessage="Не удалось изменить автозапуск. Повторите попытку.";Error(failure);}
+                    if(reconnect && !runner.Running && !runner.StartupEnabled){try{await StartEngine(strategy,CancellationToken.None);}catch(Exception restart){Error(restart);}}
+                }
+            }finally{startupChanging=false;busy=false;if(!IsDisposed)RefreshState();}
         }
         void FilterProfiles() {
             var selected = profiles.SelectedItem == null ? store.Settings.Strategy : profiles.SelectedItem.ToString();
@@ -282,7 +307,9 @@ namespace ZapretDesktop {
             if(dnsBusy || scanning || busy)return;dnsBusy=true;RefreshState();
             try {
                 var report=await DnsDiagnostics.Run(CancellationToken.None);if(IsDisposed)return;Append(report);
-                using(var dialog=new DnsDiagnosticDialog(report,OpenYouTubeDns,target=>Guard(()=>Open(target))))dialog.ShowDialog(this);
+                string helpTopic=null;
+                using(var dialog=new DnsDiagnosticDialog(report,OpenYouTubeDns,topic=>helpTopic=topic))dialog.ShowDialog(this);
+                if(helpTopic!=null && !IsDisposed)ShowHelp(helpTopic);
             }catch(Exception ex){if(!IsDisposed)Error(ex);}finally{dnsBusy=false;if(!IsDisposed)RefreshState();}
         }
         async Task OpenYouTubeDns() {
@@ -312,11 +339,12 @@ namespace ZapretDesktop {
         }
         void RefreshState() {
             if (IsDisposed) return;
-                        if(!busy && !starting && !scanning){try{runner.RefreshStartup();}catch(Exception ex){startupStatus.Text="Не удалось проверить автозапуск";Trace.TraceError(ex.Message);}}
             bool on = runner.Running, external = !on && runner.Conflict;
             startWindows.Enabled=!busy && !starting && !scanning && !testing && !dnsBusy && !appUpdates.Working && !external && !domainEditor.Dirty;
-            bool previousLoading=loading;loading=true;startWindows.Checked=runner.StartupEnabled;loading=previousLoading;
-            startupStatus.Text=runner.StartupEnabled?(on?"Автозапуск включён · служба работает":"Автозапуск включён · обход запустится при старте Windows"):"Автозапуск выключен";
+            if(!startupChanging){bool previousLoading=loading;loading=true;startWindows.Checked=runner.StartupEnabled;loading=previousLoading;}
+            startupStatus.Text=startupChanging?(startWindows.Checked?"Включаем… Подтвердите запрос Windows, если он появится.":"Выключаем… Подтвердите запрос Windows, если он появится."):
+                startupMessage.Length>0?startupMessage:startupReadError.Length>0?startupReadError:runner.StartupEnabled?(on?"Автозапуск включён · обход работает":"Автозапуск включён · обход запустится при старте Windows"):"Автозапуск выключен";
+            startupStatus.ForeColor=startupChanging?Theme.Muted:startupReadError.Length>0 || startupMessage.Length>0?Theme.Warning:runner.StartupEnabled?Theme.Success:Theme.Muted;
             if(runner.StartupEnabled && on && !starting && !scanning)activeStrategy=runner.StartupStrategy;
             if(previouslyOn && !on && !scanning && !starting && !exiting) { InvalidateChecks("Ядро остановлено · проверка требуется заново"); if(checkCancellation!=null)checkCancellation.Cancel(); }
             previouslyOn=on;
