@@ -299,7 +299,7 @@ namespace ZapretDesktop {
             dashboard.ClearResults("Проверяем: "+engineState+"…");RefreshState();
             try {
                 var results=await ServiceChecks.Batch(token,(index,item)=>{if(IsDisposed || epoch!=checkEpoch)return;dashboard.SetResult(index,item);Append(ServiceChecks.Targets[index].Name+": "+item.Detail+" · "+item.Milliseconds+" мс");});
-                if(!IsDisposed && epoch==checkEpoch){checkSummary.Text="Сетевых проб: "+results.Count(x=>x.State==1)+" из "+ServiceChecks.Targets.Length+(!runner.Running && !runner.Conflict?" · обход выключен":results.All(x=>x.State==1)?" · проверьте Discord":"");if(results.Any(x=>x.Failure=="dns"))dashboard.ScanSummary.Text="Есть ошибка DNS.\nНажмите «Диагностика DNS».";}
+                if(!IsDisposed && epoch==checkEpoch){checkSummary.Text="Сетевых проб: "+results.Count(x=>x.State==1)+" из "+ServiceChecks.Targets.Length+(!runner.Running && !runner.Conflict?" · обход выключен":results.All(x=>x.State==1)?" · проверьте Discord":"");if(results.Any(x=>x.Failure=="dns"))dashboard.ScanSummary.Text="Есть ошибка DNS Windows.\nНажмите «Диагностика DNS».";else if(results.Any(x=>x.State==1 && x.DnsRoute=="doh"))dashboard.ScanSummary.Text="YouTube доступен через DoH.\nВ браузере включите безопасный DNS.";}
             }catch(OperationCanceledException){}catch(Exception ex){if(!IsDisposed)Error(ex);}
             finally{testing=false;localCancellation.Dispose();if(checkCancellation==localCancellation)checkCancellation=null;if(!IsDisposed)RefreshState();}
         }

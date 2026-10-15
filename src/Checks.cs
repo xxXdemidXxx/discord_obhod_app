@@ -26,6 +26,7 @@ namespace ZapretDesktop {
         public int State; // 0: unavailable; 1: probe passed; 2: unexpected server response
         public string Detail; public long Milliseconds;
         public string Failure = "";
+        public string DnsRoute = "windows", SystemDnsFailure = "";
     }
     public static class ServiceChecks {
         public static readonly ServiceTarget[] Targets = {
@@ -36,10 +37,36 @@ namespace ZapretDesktop {
             new ServiceTarget("Discord · обновления", "https://updates.discord.com/distributions/app/manifests/latest?platform=win&channel=stable&arch=x64", ProbeKind.DiscordUpdates),
             new ServiceTarget("GitHub · обновления", "https://github.com/xxXdemidXxx/discord_obhod_app/releases/latest")
         };
+        static HttpClientHandler DirectHandler(){return new HttpClientHandler{UseProxy=false,AllowAutoRedirect=false,AutomaticDecompression=DecompressionMethods.GZip|DecompressionMethods.Deflate};}
+        internal static bool YouTubeTarget(ServiceTarget target){
+            Uri url;return target.Kind==ProbeKind.Http && Uri.TryCreate(target.Url,UriKind.Absolute,out url) && url.Scheme=="https" && url.IsDefaultPort && url.UserInfo.Length==0 && (url.Host=="www.youtube.com" || url.Host=="i.ytimg.com");
+        }
         public static Task<CheckResult> Run(ServiceTarget target, CancellationToken token, int timeoutSeconds = 12) {
-            return Run(target, token, timeoutSeconds, new HttpClientHandler {
-                UseProxy = false, AllowAutoRedirect = false, AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate
-            }, CheckGateway);
+            return RunWithDnsFallback(target,token,timeoutSeconds,
+                cancel=>Run(target,cancel,timeoutSeconds,DirectHandler(),CheckGateway),
+                cancel=>RunYouTubeDoH(target,cancel,timeoutSeconds));
+        }
+        internal static async Task<CheckResult> RunWithDnsFallback(ServiceTarget target,CancellationToken token,int timeoutSeconds,Func<CancellationToken,Task<CheckResult>> direct,Func<CancellationToken,Task<CheckResult>> doh){
+            var watch=Stopwatch.StartNew();
+            using(var deadline=CancellationTokenSource.CreateLinkedTokenSource(token)){
+                deadline.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
+                var result=await direct(deadline.Token);
+                if(result.Failure=="dns" && YouTubeTarget(target) && !deadline.IsCancellationRequested){
+                    string original=result.Detail;
+                    try{result=await doh(deadline.Token);}catch(OperationCanceledException){result=new CheckResult{Failure="cancelled",Detail="Отменено"};}
+                    catch(Exception ex){if(!(ex is IOException) && !(ex is SocketException) && !(ex is HttpRequestException))throw;result=FromException(ex,watch.ElapsedMilliseconds);}
+                    result.DnsRoute="doh";result.SystemDnsFailure=original;
+                    result.Detail=(result.State==1?"Доступен через DoH. ":"Повтор через DoH: ")+result.Detail+" | DNS Windows не работает: "+original;
+                }
+                if(deadline.IsCancellationRequested){result.State=0;result.Failure=token.IsCancellationRequested?"cancelled":"timeout";result.Detail=(token.IsCancellationRequested?"Отменено":"Тайм-аут · "+timeoutSeconds+" секунд")+" | "+target.Url+(result.SystemDnsFailure.Length>0?" | DNS Windows не работает: "+result.SystemDnsFailure:"");}
+                result.Milliseconds=watch.ElapsedMilliseconds;return result;
+            }
+        }
+        internal static async Task<CheckResult> RunYouTubeDoH(ServiceTarget target,CancellationToken token,int timeoutSeconds){
+            using(var dns=new DnsOverHttps())using(var proxy=new YouTubeDnsProxy(dns.Resolve,httpConnect:true)){
+                var handler=DirectHandler();handler.UseProxy=true;handler.Proxy=new WebProxy(new Uri("http://127.0.0.1:"+proxy.Port),false);
+                return await Run(target,token,timeoutSeconds,handler,CheckGateway);
+            }
         }
         // Inject transports for offline tests; never use a live VPN connection to validate a strategy.
         internal static async Task<CheckResult> Run(ServiceTarget target, CancellationToken token, int timeoutSeconds,

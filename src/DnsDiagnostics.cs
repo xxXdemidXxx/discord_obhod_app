@@ -41,7 +41,7 @@ namespace ZapretDesktop {
             if(!systemOk && dohOk) report.AppendLine("Windows не определяет имя, а Google DoH определяет. Попробуйте «Открыть YouTube в отдельном окне»: оно использует DNS через HTTPS без изменения Windows. Перебор DPI-стратегий сам по себе не исправляет DNS.");
             else if(systemOk) report.AppendLine("Сейчас Windows определяет имя YouTube. Повторите HTTPS-проверку: ошибка могла быть временной. Если соединение не проходит, попробуйте автоподбор стратегий.");
             else report.AppendLine("Имя не удалось проверить обоими способами. Проверьте интернет и DNS сетевого подключения.");
-            report.AppendLine("\r\nКороткие инструкции: вкладка «Помощь» → «DNS в браузере» или «DNS в Windows». Проверки ByPass используют DNS Windows.");
+            report.AppendLine("\r\nКороткие инструкции: вкладка «Помощь» → «DNS в браузере» или «DNS в Windows». Проверки YouTube сначала используют DNS Windows, а при его ошибке повторяются через DNS по HTTPS (DoH).");
             return report.ToString();
         }
     }

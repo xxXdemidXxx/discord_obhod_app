@@ -19,12 +19,13 @@ namespace ZapretDesktop {
         readonly Dictionary<string,CacheEntry> cache=new Dictionary<string,CacheEntry>();
         readonly SemaphoreSlim slots=new SemaphoreSlim(96);
         readonly Task accept;
+        readonly bool httpConnect;
         int disposed;
         sealed class CacheEntry {internal DnsAnswer Answer;internal DateTime Expires;}
         internal IPAddress Address {get{return ((IPEndPoint)listener.LocalEndpoint).Address;}}
         internal int Port {get{return ((IPEndPoint)listener.LocalEndpoint).Port;}}
-        internal YouTubeDnsProxy(Func<string,CancellationToken,Task<DnsAnswer>> resolver,Func<IPAddress,int,Task<TcpClient>> connector=null) {
-            resolve=resolver;connect=connector??Connect;
+        internal YouTubeDnsProxy(Func<string,CancellationToken,Task<DnsAnswer>> resolver,Func<IPAddress,int,Task<TcpClient>> connector=null,bool httpConnect=false) {
+            resolve=resolver;connect=connector??Connect;this.httpConnect=httpConnect;
             listener=new TcpListener(IPAddress.Loopback,0);listener.Start(96);accept=Accept();
         }
         async Task Accept() {
@@ -58,6 +59,17 @@ namespace ZapretDesktop {
             if(port!=443 && port!=80)throw new IOException("Разрешены только веб-соединения.");
             return host;
         }
+        internal static string HttpDestination(Stream stream){
+            var bytes=new List<byte>();int value;
+            while(bytes.Count<8192){value=stream.ReadByte();if(value<0)throw new EndOfStreamException();bytes.Add((byte)value);int n=bytes.Count;if(n>=4 && bytes[n-4]==13 && bytes[n-3]==10 && bytes[n-2]==13 && bytes[n-1]==10)break;}
+            if(bytes.Count>=8192)throw new IOException("Заголовок CONNECT слишком большой.");
+            string header=System.Text.Encoding.ASCII.GetString(bytes.ToArray());
+            var match=System.Text.RegularExpressions.Regex.Match(header,@"^CONNECT ([a-zA-Z0-9.-]+):443 HTTP/1\.[01]\r\n");
+            if(!match.Success)throw new IOException("Разрешён только HTTPS CONNECT.");
+            string host=DnsOverHttps.Host(match.Groups[1].Value);
+            if(host!="youtube.com" && !host.EndsWith(".youtube.com",StringComparison.Ordinal) && host!="ytimg.com" && !host.EndsWith(".ytimg.com",StringComparison.Ordinal))throw new IOException("Проверка DoH разрешена только для YouTube.");
+            return host;
+        }
         async Task<DnsAnswer> Resolve(string host) {
             lock(cache){CacheEntry entry;if(cache.TryGetValue(host,out entry) && entry.Expires>DateTime.UtcNow)return entry.Answer;}
             var answer=await resolve(host,lifetime.Token).ConfigureAwait(false);
@@ -66,13 +78,16 @@ namespace ZapretDesktop {
             return answer;
         }
         async Task Serve(TcpClient client) {
-            TcpClient remote=null;
+            TcpClient remote=null;bool established=false;
             try {
                 client.ReceiveTimeout=10000;client.SendTimeout=10000;client.NoDelay=true;
-                var local=client.GetStream();var hello=Read(local,2);
-                if(hello[0]!=5 || hello[1]==0)throw new IOException("Неверная версия SOCKS.");
-                var methods=Read(local,hello[1]);bool accepted=methods.Contains((byte)0);local.Write(new byte[]{5,accepted?(byte)0:(byte)255},0,2);if(!accepted)return;
-                int port;string host=Destination(local,out port);
+                var local=client.GetStream();int port;string host;
+                if(httpConnect){host=HttpDestination(local);port=443;}
+                else{
+                    var hello=Read(local,2);if(hello[0]!=5 || hello[1]==0)throw new IOException("Неверная версия SOCKS.");
+                    var methods=Read(local,hello[1]);bool accepted=methods.Contains((byte)0);local.Write(new byte[]{5,accepted?(byte)0:(byte)255},0,2);if(!accepted)return;
+                    host=Destination(local,out port);
+                }
                 var answer=await Resolve(host).ConfigureAwait(false);
                 foreach(var address in answer.Addresses.Take(3)) {
                     lifetime.Token.ThrowIfCancellationRequested();
@@ -80,12 +95,13 @@ namespace ZapretDesktop {
                 }
                 if(remote==null)throw new IOException("Не удалось подключиться к сайту.");
                 lock(clients){if(lifetime.IsCancellationRequested)throw new OperationCanceledException();clients.Add(remote);}
-                local.Write(new byte[]{5,0,0,1,127,0,0,1,0,0},0,10);
+                if(httpConnect){var ok=System.Text.Encoding.ASCII.GetBytes("HTTP/1.1 200 Connection Established\r\n\r\n");local.Write(ok,0,ok.Length);}else local.Write(new byte[]{5,0,0,1,127,0,0,1,0,0},0,10);
+                established=true;
                 var upstream=remote.GetStream();var send=local.CopyToAsync(upstream,65536,lifetime.Token);var receive=upstream.CopyToAsync(local,65536,lifetime.Token);
                 await Task.WhenAny(send,receive).ConfigureAwait(false);Observe(send);Observe(receive);
             }catch(Exception ex) {
                 if(!(ex is IOException) && !(ex is SocketException) && !(ex is OperationCanceledException) && !(ex is ObjectDisposedException))System.Diagnostics.Trace.TraceError(ex.ToString());
-                try{client.GetStream().Write(new byte[]{5,1,0,1,0,0,0,0,0,0},0,10);}catch{}
+                try{if(!established){var failure=httpConnect?System.Text.Encoding.ASCII.GetBytes("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"):new byte[]{5,1,0,1,0,0,0,0,0,0};client.GetStream().Write(failure,0,failure.Length);}}catch{}
             }finally {
                 client.Close();if(remote!=null)remote.Close();
                 lock(clients){clients.Remove(client);if(remote!=null)clients.Remove(remote);}slots.Release();

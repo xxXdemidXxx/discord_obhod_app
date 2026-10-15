@@ -39,6 +39,51 @@ namespace ZapretDesktop {
         static string DnsFixture(string address="142.250.74.206",int ttl=180){return "{\"Status\":0,\"Answer\":[{\"type\":5,\"data\":\"youtube-ui.l.google.com\",\"TTL\":10},{\"type\":1,\"data\":\""+address+"\",\"TTL\":"+ttl+"}]}";}
         static byte[] SocksRequest(string host,int port=443){byte[] name=System.Text.Encoding.ASCII.GetBytes(host);return new byte[]{5,1,0,3,(byte)name.Length}.Concat(name).Concat(new byte[]{(byte)(port/256),(byte)(port%256)}).ToArray();}
         static async Task<byte[]> ExactAsync(System.IO.Stream stream,int size){var bytes=new byte[size];int offset=0;while(offset<size){int count=await stream.ReadAsync(bytes,offset,size-offset);if(count==0)throw new EndOfStreamException();offset+=count;}return bytes;}
+        static async Task YouTubeDnsFallbackTests(string root){
+            Func<CheckResult> dnsError=()=>new CheckResult{Failure="dns",Detail="Тест: Windows NXDOMAIN"};
+            foreach(var target in ServiceChecks.Targets.Take(2)){
+                int retries=0;
+                var result=await ServiceChecks.RunWithDnsFallback(target,CancellationToken.None,2,_=>Task.FromResult(dnsError()),async cancel=>{retries++;return await ServiceChecks.Run(target,cancel,2,new ProbeHttp{Reply=(request,token)=>Task.FromResult(Response(200,"fixture"))},(uri,token)=>Task.FromResult(0));});
+                Assert(result.State==1 && result.DnsRoute=="doh" && result.Failure=="" && retries==1 && result.SystemDnsFailure.Contains("NXDOMAIN"),"YouTube DNS failure retries actual HTTP probe and preserves Windows failure: "+target.Name);
+            }
+            foreach(string failure in new[]{"","tls","http","timeout","cancelled","connection"}){
+                int retries=0;var primary=new CheckResult{State=failure==""?1:0,Failure=failure,Detail="primary"};
+                var result=await ServiceChecks.RunWithDnsFallback(ServiceChecks.Targets[0],CancellationToken.None,2,_=>Task.FromResult(primary),_=>{retries++;return Task.FromResult(new CheckResult{State=1});});
+                Assert(Object.ReferenceEquals(primary,result) && retries==0,"DoH does not hide successful requests or non-DNS errors: "+failure);
+            }
+            foreach(var target in ServiceChecks.Targets.Skip(2)){
+                int retries=0;var result=await ServiceChecks.RunWithDnsFallback(target,CancellationToken.None,2,_=>Task.FromResult(dnsError()),_=>{retries++;return Task.FromResult(new CheckResult{State=1});});
+                Assert(result.Failure=="dns" && retries==0,"YouTube-only fallback does not change other probes: "+target.Name);
+            }
+            foreach(int status in new[]{403,503}){
+                var result=await ServiceChecks.RunWithDnsFallback(ServiceChecks.Targets[0],CancellationToken.None,2,_=>Task.FromResult(dnsError()),cancel=>ServiceChecks.Run(ServiceChecks.Targets[0],cancel,2,new ProbeHttp{Reply=(request,token)=>Task.FromResult(Response(status,"blocked"))},(uri,token)=>Task.FromResult(0)));
+                Assert(result.State!=1 && result.Failure=="http" && result.DnsRoute=="doh" && result.SystemDnsFailure.Length>0,"Working DNS alone cannot turn failing YouTube HTTP response green: "+status);
+            }
+            using(var cancelled=new CancellationTokenSource()){
+                var result=await ServiceChecks.RunWithDnsFallback(ServiceChecks.Targets[0],cancelled.Token,2,_=>Task.FromResult(dnsError()),_=>{cancelled.Cancel();return Task.FromResult(new CheckResult{State=1,Detail="late success"});});
+                Assert(result.State==0 && result.Failure=="cancelled","Cancellation overrides a late DoH success");
+            }
+            var timed=await ServiceChecks.RunWithDnsFallback(ServiceChecks.Targets[0],CancellationToken.None,1,_=>Task.FromResult(dnsError()),async cancel=>{try{await Task.Delay(3000,cancel);}catch(OperationCanceledException){}return new CheckResult{State=1};});
+            Assert(timed.State==0 && timed.Failure=="timeout" && timed.Milliseconds<2500,"Both DNS attempts share one deadline and cannot return late green status");
+            foreach(string request in new[]{"GET https://www.youtube.com/ HTTP/1.1\r\n\r\n","CONNECT www.youtube.com:80 HTTP/1.1\r\n\r\n","CONNECT youtube.com.evil.example:443 HTTP/1.1\r\n\r\n","CONNECT 127.0.0.1:443 HTTP/1.1\r\n\r\n","CONNECT github.com:443 HTTP/1.1\r\n\r\n"})
+                using(var stream=new MemoryStream(System.Text.Encoding.ASCII.GetBytes(request)))DnsReject(()=>YouTubeDnsProxy.HttpDestination(stream),"HTTPS check relay rejects non-YouTube destination or unsafe protocol");
+            using(var stream=new MemoryStream(System.Text.Encoding.ASCII.GetBytes("CONNECT WWW.YOUTUBE.COM:443 HTTP/1.1\r\nHost: www.youtube.com:443\r\n\r\n")))Assert(YouTubeDnsProxy.HttpDestination(stream)=="www.youtube.com","HTTP CONNECT accepts and normalizes exact YouTube hostname");
+            var listener=new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback,0);listener.Start();int port=((System.Net.IPEndPoint)listener.LocalEndpoint).Port;int resolved=0;
+            try{
+                using(var proxy=new YouTubeDnsProxy((host,token)=>{resolved++;Assert(host=="www.youtube.com","Real CONNECT resolves original YouTube hostname through DoH delegate");return Task.FromResult(new DnsAnswer{Addresses=new[]{System.Net.IPAddress.Parse("8.8.8.8")}});},async(ip,destinationPort)=>{Assert(ip.ToString()=="8.8.8.8" && destinationPort==443,"Real CONNECT connects to validated DNS answer on HTTPS port");var peer=new System.Net.Sockets.TcpClient();await peer.ConnectAsync(System.Net.IPAddress.Loopback,port);return peer;},httpConnect:true)){
+                    var echo=Task.Run(async()=>{using(var peer=await listener.AcceptTcpClientAsync()){var stream=peer.GetStream();var payload=await ExactAsync(stream,4);await stream.WriteAsync(payload,0,payload.Length);}});
+                    using(var client=new System.Net.Sockets.TcpClient()){
+                        await client.ConnectAsync(System.Net.IPAddress.Loopback,proxy.Port);var stream=client.GetStream();var request=System.Text.Encoding.ASCII.GetBytes("CONNECT www.youtube.com:443 HTTP/1.1\r\nHost: www.youtube.com:443\r\n\r\n");await stream.WriteAsync(request,0,request.Length);
+                        var header=await ExactAsync(stream,39);Assert(System.Text.Encoding.ASCII.GetString(header)=="HTTP/1.1 200 Connection Established\r\n\r\n","Real HTTP CONNECT handshake opens DoH tunnel");
+                        var tls=new byte[]{22,3,3,42};await stream.WriteAsync(tls,0,tls.Length);Assert((await ExactAsync(stream,4)).SequenceEqual(tls),"HTTP relay forwards TLS bytes unchanged without replacing certificates");
+                    }await echo;Assert(resolved==1,"HTTP relay uses supplied DNS resolver exactly once");
+                }
+            }finally{listener.Stop();}
+            using(var dashboard=new Dashboard{Size=new Size(1000,550)}){
+                dashboard.SetResult(0,new CheckResult{State=1,DnsRoute="doh",Detail="Тестовый HTTPS-запрос успешен; DNS Windows: NXDOMAIN"});
+                Assert(dashboard.Statuses[0].Text=="Доступен через DoH" && dashboard.Statuses[0].AccessibleDescription.Contains("NXDOMAIN"),"Dashboard labels fallback explicitly and keeps Windows DNS error in details");
+            }
+        }
         static async Task YouTubeDnsTests(string root) {
             var answer=DnsOverHttps.Parse(DnsFixture());Assert(answer.Addresses.Single().ToString()=="142.250.74.206" && answer.Ttl==180,"DoH parser requires an actual public A answer and retains bounded TTL");
             DnsReject(()=>DnsOverHttps.Parse("{\"Status\":0,\"Answer\":[{\"type\":5,\"data\":\"alias.example\"}]}"),"CNAME-only response cannot falsely report successful DNS");
@@ -324,7 +369,14 @@ namespace ZapretDesktop {
                 var root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".."));
                 var local = Path.GetFullPath(Path.Combine(root, "..", "zapret-discord-youtube-1.10.2"));
                 var official = Path.Combine(root, "downloads", "official-1.10.3", "zapret-discord-youtube-1.10.3");
-                local=official;YouTubeDnsTests(root).GetAwaiter().GetResult();StartupTests(root,official);SecurityTests(root,official);LegacyMigrationTest(root); DriverRecoveryTests(root); FeedbackAndDriverTests(root,official).GetAwaiter().GetResult(); SelectionTests().GetAwaiter().GetResult(); ServiceProbeTests().GetAwaiter().GetResult(); DomainTests(root); UpdateFeedTests().GetAwaiter().GetResult(); AppUpdateSessionTests(root).GetAwaiter().GetResult(); StageTests(root).GetAwaiter().GetResult(); ShellReplacementTest(root); ShellRollbackTest(root); ShellHandshakeTest(root);
+                if(args.Contains("--youtube-doh-only")){
+                    System.Net.ServicePointManager.SecurityProtocol=System.Net.SecurityProtocolType.Tls12;
+                    foreach(var target in ServiceChecks.Targets.Take(2)){
+                        var result=ServiceChecks.RunWithDnsFallback(target,CancellationToken.None,12,_=>Task.FromResult(new CheckResult{Failure="dns",Detail="Тестовый сбой DNS Windows"}),cancel=>ServiceChecks.RunYouTubeDoH(target,cancel,12)).GetAwaiter().GetResult();
+                        Console.WriteLine(target.Name+": state="+result.State+", route="+result.DnsRoute+", "+result.Detail);if(result.State!=1)return 1;
+                    }return 0;
+                }
+                local=official;YouTubeDnsFallbackTests(root).GetAwaiter().GetResult();YouTubeDnsTests(root).GetAwaiter().GetResult();StartupTests(root,official);SecurityTests(root,official);LegacyMigrationTest(root); DriverRecoveryTests(root); FeedbackAndDriverTests(root,official).GetAwaiter().GetResult(); SelectionTests().GetAwaiter().GetResult(); ServiceProbeTests().GetAwaiter().GetResult(); DomainTests(root); UpdateFeedTests().GetAwaiter().GetResult(); AppUpdateSessionTests(root).GetAwaiter().GetResult(); StageTests(root).GetAwaiter().GetResult(); ShellReplacementTest(root); ShellRollbackTest(root); ShellHandshakeTest(root);
                 foreach (var engine in new[] {local, official}.Distinct()) {
                     Strategy.ValidateEngine(engine);
                     var profiles = Directory.GetFiles(engine, "general*.bat"); Assert(profiles.Length == 22, "22 upstream profiles expected");
