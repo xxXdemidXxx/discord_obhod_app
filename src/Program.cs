@@ -282,9 +282,9 @@ namespace ZapretDesktop {
             if (busy || scanning || checkingUpdates) return; checkingUpdates = true; RefreshState();
             try {
                 coreManual.Tag=null;updateText.Text = "Проверяем обновления…"; release = await updater.Check(); if(IsDisposed)return;
-                if (release.Version == Updater.Version(store.Current)) { updateText.Text = "Обновлений нет"; release = null; }
+                if (!Updater.IsNewer(release.Version,Updater.Version(store.Current))) { updateText.Text = "Установлена последняя проверенная версия"; release = null; }
                 else { updateText.Text = "Доступна версия " + release.Version; Append("Доступно обновление ядра " + release.Version);if(store.Settings.AutoInstallCore)await InstallCore(true); }
-            } catch (Exception ex) { if(IsDisposed)return; coreManual.Tag=true;release = null; updateText.Text = ex is UpdateCheckException?ex.Message:"Не удалось проверить обновления. Попробуйте позже."; Append("Проверка обновлений: " + ex.Message); }
+            } catch (Exception ex) { if(IsDisposed)return; coreManual.Tag=true;release = null; updateText.Text = ex is UpdateCheckException || ex is InvalidDataException?ex.Message:"Не удалось проверить обновления. Попробуйте позже."; Append("Проверка обновлений: " + ex.Message); }
             finally { checkingUpdates = false; RefreshState(); }
         }
         Task RunChecks() {
@@ -327,14 +327,31 @@ namespace ZapretDesktop {
         async Task InstallCore(bool automatic) {
             if (busy || scanning || starting || domainEditor.Dirty || release == null) return;
             if(automatic && !store.Settings.AutoInstallCore)return;
-            if (runner.Conflict || (!automatic && runner.Running)) { if(!automatic)Error(new InvalidOperationException("Сначала выключите обход."));else Append("Автообновление ядра отложено: запущен другой обход.");return; }
+            if (runner.Conflict) { if(!automatic)Error(new InvalidOperationException("Сначала выключите другой обход."));else Append("Автообновление ядра отложено: запущен другой обход.");return; }
             if(!automatic && !confirmUpdate("Обновление ядра","Установить новую версию ядра "+release.Version+"?\n\nВаши настройки и списки сохранятся. Предыдущую версию можно будет вернуть."))return;
-            bool reconnect=runner.Running;
+            bool reconnect=false,switched=false;string old=store.Settings.Engine,previous=store.Settings.PreviousEngine;
             busy = true; RefreshState();
             try {
-                try { await StopChecks(); if(reconnect)runner.Stop();InvalidateChecks("Обновляем ядро…"); await updater.Install(release, message => {updateText.Text = message; Append(message);}); runner.SyncStartup(store.Current,store.Settings.Strategy);release = null; LoadSettings(); }
-                catch (Exception ex) { updateText.Text = "Обновление не установлено. Текущее ядро сохранено."; if(!IsDisposed)Error(ex); }
-                if(reconnect && !IsDisposed && !exiting){try{await StartEngine(store.Settings.Strategy,CancellationToken.None);}catch(Exception ex){Error(ex);}}
+                Exception failure=null;
+                try {
+                    using(var prepared=await updater.Prepare(release,message=>{if(!IsDisposed)updateText.Text=message;Append(message);})) {
+                        if(IsDisposed || exiting)return;
+                        if(runner.Conflict)throw new InvalidOperationException("Запущен другой обход. Повторите установку после его остановки.");
+                        await StopChecks();reconnect=runner.Running;
+                        if(reconnect)runner.Stop();InvalidateChecks("Переключаем ядро…");
+                        updater.Activate(prepared);switched=true;runner.SyncStartup(store.Current,store.Settings.Strategy);
+                        if(reconnect)await StartEngine(store.Settings.Strategy,CancellationToken.None);
+                        release=null;LoadSettings();updateText.Text="Ядро обновлено"+(reconnect?" · подключение восстановлено":"");Append(updateText.Text);
+                    }
+                } catch (Exception ex) {failure=ex;}
+                if(failure!=null) {
+                    if(switched) {
+                        try {runner.Stop();store.Settings.Engine=old;store.Settings.PreviousEngine=previous;store.Save();runner.SyncStartup(store.Current,store.Settings.Strategy);LoadSettings();}
+                        catch(Exception recovery){Append("Не удалось восстановить прежнее ядро: "+recovery.Message);}
+                    }
+                    if(reconnect && !IsDisposed && !exiting){try{await StartEngine(store.Settings.Strategy,CancellationToken.None);}catch(Exception recovery){Append("Не удалось восстановить подключение: "+recovery.Message);}}
+                    updateText.Text="Обновление не установлено. "+(store.Settings.Engine==old?"Сохранено прежнее ядро.":"Проверьте состояние ядра в журнале.");if(!IsDisposed)Error(failure);
+                }
             }finally{busy=false;if(!IsDisposed)RefreshState();}
         }
         void RefreshState() {
@@ -358,7 +375,7 @@ namespace ZapretDesktop {
             dashboard.Apply.Enabled = dashboard.Scan.Enabled = !busy && !external && !starting && !scanning && !testing && !dnsBusy;
             dashboard.Cancel.Enabled = scanning && scanCancellation!=null && !scanCancellation.IsCancellationRequested;
             dashboard.Dns.Enabled = !busy && !starting && !scanning && !dnsBusy;
-            check.Enabled = !busy && !scanning && !checkingUpdates; install.Enabled = !on && !external && !busy && !scanning && !starting && !checkingUpdates && !testing && !domainEditor.Dirty && release != null;
+            check.Enabled = !busy && !scanning && !checkingUpdates; install.Enabled = !external && !busy && !scanning && !starting && !checkingUpdates && !testing && !domainEditor.Dirty && release != null;
             rollback.Enabled = !on && !external && !busy && !scanning && !starting && !checkingUpdates && !testing && !domainEditor.Dirty && !String.IsNullOrEmpty(store.Settings.PreviousEngine);
             autoCheck.Enabled = !busy && !checkingUpdates && !store.Settings.AutoInstallCore;autoInstallCore.Enabled=!busy && !checkingUpdates; runChecks.Enabled = !busy && !starting && !scanning && !testing;
             appUpdateCard.Action.Enabled = !appUpdates.Working && !busy && !starting && !scanning && !dnsBusy && (appUpdates.Release==null || !domainEditor.Dirty);

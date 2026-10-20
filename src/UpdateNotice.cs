@@ -34,7 +34,7 @@ namespace ZapretDesktop {
         public void Render(string shell,string core,bool shellEnabled,bool coreEnabled,bool stopCoreFirst) {
             shellVersion=shell;coreVersion=core;
             shellText.Text="Доступна новая версия оболочки: "+shell;
-            coreText.Text="Доступна новая версия ядра: "+core+(stopCoreFirst?" · сначала выключите обход":"");
+            coreText.Text="Доступна новая версия ядра: "+core;
             shellAction.Enabled=shellEnabled;coreAction.Enabled=coreEnabled;RefreshRows();
         }
         void RefreshRows() {

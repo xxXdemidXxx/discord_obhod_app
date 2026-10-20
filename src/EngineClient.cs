@@ -24,6 +24,7 @@ namespace ZapretDesktop {
         public bool Ready {get{return startup.Owned?startup.Running:running && ready;}} public string DriverFailure {get{return driverFailure;}}
 #if TESTING
         internal Func<bool> ConflictCheck=null; internal Action<bool,string,string> TestStartupChange=null;
+        internal Action<string,string> TestStart=null,TestSync=null;internal Action TestStop=null;
 #endif
         public bool Conflict {
             get {
@@ -87,13 +88,20 @@ namespace ZapretDesktop {
             ready=false;driverFailure=null;
             try {
                 Trust.VerifyEngine(engine);
+#if TESTING
+                if(TestStart!=null){TestStart(engine,strategy);running=true;ready=true;return;}
+#endif
                 if(!String.Equals(Path.GetDirectoryName(Path.GetFullPath(engine)),Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"data","engines").TrimEnd('\\'),StringComparison.OrdinalIgnoreCase))throw new InvalidDataException("Ядро должно находиться в папке приложения.");
                 Connect();
             }catch(Exception ex){throw new EngineSetupException("Не удалось подготовить запуск ядра.\n"+ex.Message,ex);}
             try{Ask("start",Path.GetFileName(engine),strategy);}catch(IOException ex){throw new EngineSetupException("Не удалось связаться с компонентом запуска. Повторите запуск ByPass.\n"+ex.Message,ex);}
             }
         }
-        public void Stop(){lock(gate){ready=false;if(StartupEnabled && !connected)Connect();if(connected)Ask("stop",null,null);running=false;}}
+        public void Stop(){lock(gate){ready=false;
+#if TESTING
+            if(TestStop!=null){TestStop();running=false;return;}
+#endif
+            if(StartupEnabled && !connected)Connect();if(connected)Ask("stop",null,null);running=false;}}
         internal void SetStartup(bool enabled,string engine,string strategy) {
             lock(gate){
 #if TESTING
@@ -102,7 +110,11 @@ namespace ZapretDesktop {
                 Connect();Ask(enabled?"startup-enable":"startup-disable",enabled?Path.GetFileName(engine):null,enabled?strategy:null);RefreshStartup();}
         }
         internal void SyncStartup(string engine,string strategy) {
-            lock(gate){RefreshStartup();if(!StartupEnabled)return;Connect();Ask("startup-sync",Path.GetFileName(engine),strategy);}
+            lock(gate){
+#if TESTING
+                if(TestSync!=null){TestSync(engine,strategy);return;}
+#endif
+                RefreshStartup();if(!StartupEnabled)return;Connect();Ask("startup-sync",Path.GetFileName(engine),strategy);}
         }
         internal static async Task WaitForReady(Func<bool> running,Func<bool> ready,CancellationToken token,int timeoutMilliseconds=10000,Func<string> driverError=null) {
             var watch=Stopwatch.StartNew();

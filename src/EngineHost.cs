@@ -64,7 +64,7 @@ namespace ZapretDesktop {
             acl.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid,null),FileSystemRights.ReadAndExecute,AccessControlType.Allow));File.SetAccessControl(path,acl);
         }
     }
-    // This entry point is compiled into a separate executable with no HTTP client or GUI.
+    // The host independently authenticates new upstream cores before elevation to a snapshot.
     internal static class EngineHost {
         [STAThread] static int Main(string[] args) {
             try {
@@ -119,6 +119,7 @@ namespace ZapretDesktop {
                                         Dictionary<string,byte[]> inputs=null;
                                         // Read with the caller's token, so the administrator cannot be used to read privileged files.
                                         HostWire.AsCaller(parent,()=>{inputs=ReadInputs(source);});
+                                        RememberApproval(inputs);
                                         var startup=StartupService.Read(installation);
                                         if(action=="startup-enable" || action=="startup-sync" || startup.Owned) {
                                             if(action=="startup-sync" && !startup.Owned)throw new InvalidOperationException("Автозапуск не установлен.");
@@ -239,7 +240,18 @@ namespace ZapretDesktop {
                     if(offset!=bytes.Length)throw new IOException("Неполное чтение ядра.");result.Add(relative,bytes);
                 }
             }
+            if(entry.ContainsKey("origin"))result[UpstreamTrust.ReceiptName]=Encoding.UTF8.GetBytes(UpstreamTrust.Serialize(entry));
             return result;
+        }
+        internal static void RememberApproval(Dictionary<string,byte[]> inputs) {
+            byte[] receipt;if(!inputs.TryGetValue(UpstreamTrust.ReceiptName,out receipt))return;
+            string path=UpstreamTrust.AuthenticatedApproval(receipt);HostWire.ProtectDirectory(UpstreamTrust.ApprovalRoot);Trust.NoLinks(path);
+            string temp=path+"."+Guid.NewGuid().ToString("N")+".tmp";
+            try {
+                File.WriteAllBytes(temp,receipt);HostWire.ProtectFile(temp);
+                if(File.Exists(path))File.Replace(temp,path,null);else File.Move(temp,path);
+                HostWire.ProtectFile(path);
+            }finally{if(File.Exists(temp))File.Delete(temp);}
         }
     }
 }

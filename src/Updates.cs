@@ -16,6 +16,10 @@ namespace ZapretDesktop {
         public string Version, Url, Digest, Notes, Proof;
         public long Size;
     }
+    public sealed class PreparedCore : IDisposable {
+        internal string Staging, Engine, Version;
+        public void Dispose(){try{Directory.Delete(Staging,true);}catch{}}
+    }
     public sealed class Updater : IDisposable {
         private readonly HttpClient client;
         private readonly Store store;
@@ -26,25 +30,20 @@ namespace ZapretDesktop {
             client.DefaultRequestHeaders.UserAgent.ParseAdd("ByPass/"+ShellUpdates.Current);
             client.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
         }
+        public static bool IsNewer(string candidate,string current) {
+            System.Version next,installed;
+            return System.Version.TryParse(candidate,out next) && (!System.Version.TryParse(current,out installed) || next>installed);
+        }
+        static void ValidateRelease(Release release) {
+            if(release==null || !Regex.IsMatch(release.Version??"",@"^\d+\.\d+\.\d+$") || release.Url!=UpstreamTrust.ArchiveUrl(release.Version))throw new InvalidDataException("Неверные данные обновления ядра.");
+            if(!Regex.IsMatch(release.Digest??"",@"^sha256:[a-fA-F0-9]{64}$"))throw new InvalidDataException("Для релиза нет проверенного SHA-256.");
+            if(release.Size<1 || release.Size>64*1024*1024)throw new InvalidDataException("Неожиданный размер архива.");
+        }
         public async Task<Release> Check() {
-            var json = await GitHubMetadata.Get(client,"https://api.github.com/repos/Flowseal/zapret-discord-youtube/releases/latest");
-            var data = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(json);
-            var version = Convert.ToString(data["tag_name"]); store.EnginePath(version);
-            var assets = (ArrayList)data["assets"];
-            foreach (Dictionary<string, object> asset in assets) {
-                if (Convert.ToString(asset["name"]) != "zapret-discord-youtube-" + version + ".zip") continue;
-                var release = new Release { Version = version, Url = Convert.ToString(asset["browser_download_url"]),
-                    Digest = asset.ContainsKey("digest") ? Convert.ToString(asset["digest"]) : "",
-                    Size = Convert.ToInt64(asset["size"]), Notes = Convert.ToString(data["body"]) };
-                if (release.Url != "https://github.com/Flowseal/zapret-discord-youtube/releases/download/" + version + "/zapret-discord-youtube-" + version + ".zip")
-                    throw new InvalidDataException("GitHub вернул неожиданный адрес архива.");
-                if (!Regex.IsMatch(release.Digest ?? "", @"^sha256:[a-fA-F0-9]{64}$"))
-                    throw new InvalidDataException("Для релиза нет SHA-256. Автоустановка отключена; откройте страницу релизов.");
-                if (release.Size < 1 || release.Size > 64 * 1024 * 1024) throw new InvalidDataException("Неожиданный размер архива.");
-                Trust.Archive(release.Version,release.Digest);
-                return release;
-            }
-            throw new InvalidDataException("В релизе не найден официальный ZIP-архив.");
+            var json=await GitHubMetadata.Get(client,"https://api.github.com/repos/Flowseal/zapret-discord-youtube/releases/latest");
+            var entry=UpstreamTrust.ParseRelease(json);
+            string version=(string)entry["version"];
+            return new Release{Version=version,Url=UpstreamTrust.ArchiveUrl(version),Digest="sha256:"+(string)entry["archive_sha256"],Size=Convert.ToInt64(entry["archive_size"])};
         }
         public static void Extract(string zip, string destination) {
             Directory.CreateDirectory(destination);
@@ -89,8 +88,8 @@ namespace ZapretDesktop {
             using (var sha = SHA256.Create()) using (var file = File.OpenRead(path))
                 return BitConverter.ToString(sha.ComputeHash(file)).Replace("-", "").ToLowerInvariant();
         }
-        public async Task Install(Release release, Action<string> progress) {
-            Trust.Archive(release.Version,release.Digest);
+        public async Task<PreparedCore> Prepare(Release release, Action<string> progress) {
+            ValidateRelease(release);
             var staging = Path.Combine(store.Root, "data", "staging-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(staging);
             try {
@@ -112,17 +111,30 @@ namespace ZapretDesktop {
                 progress("Проверка файлов и сохранение ваших настроек…");
                 var extracted = Path.Combine(staging, "unpacked");
                 await Task.Run(() => Extract(zip, extracted));
-                var engine = FindEngine(extracted); Trust.VerifyEngine(engine);Strategy.ValidateEngine(engine);
+                var engine = FindEngine(extracted);
+                File.Copy(zip,Path.Combine(engine,UpstreamTrust.ArchiveName));
+                File.WriteAllText(Path.Combine(engine,UpstreamTrust.ReceiptName),UpstreamTrust.Serialize(new{version=release.Version,archive_sha256=release.Digest.Substring(7).ToLowerInvariant(),archive_size=release.Size}));
+                Trust.VerifyEngine(engine);Strategy.ValidateEngine(engine);
+                if(Version(engine)!=release.Version)throw new InvalidDataException("Версия ядра внутри архива не совпадает с выпуском.");
                 File.WriteAllText(Path.Combine(engine, ".upstream-ipset.sha256"), Hash(Path.Combine(engine, "lists", "ipset-all.txt")));
-                Preserve(store.Current, engine);Trust.VerifyEngine(engine); Strategy.ValidateEngine(engine);
-                var versionFolder = release.Version + "-" + Guid.NewGuid().ToString("N").Substring(0, 8);
-                Directory.Move(engine, store.EnginePath(versionFolder));
+                return new PreparedCore{Staging=staging,Engine=engine,Version=release.Version};
+            } catch {try{Directory.Delete(staging,true);}catch{}throw;}
+        }
+        public void Activate(PreparedCore prepared) {
+                Preserve(store.Current, prepared.Engine);Trust.VerifyEngine(prepared.Engine); Strategy.ValidateEngine(prepared.Engine);
+                var versionFolder = prepared.Version + "-" + Guid.NewGuid().ToString("N").Substring(0, 8);
+                var destination=store.EnginePath(versionFolder);
+                Directory.Move(prepared.Engine, destination);
                 var old = store.Settings.Engine; var previous = store.Settings.PreviousEngine;
                 store.Settings.PreviousEngine = old; store.Settings.Engine = versionFolder;
                 try { store.Save(); }
-                catch { store.Settings.Engine = old; store.Settings.PreviousEngine = previous; throw; }
+                catch { store.Settings.Engine = old; store.Settings.PreviousEngine = previous;try{Directory.Delete(destination,true);}catch{}throw; }
+        }
+        public async Task Install(Release release, Action<string> progress) {
+            using(var prepared=await Prepare(release,progress)) {
+                Activate(prepared);
                 progress("Установлено ядро " + release.Version + ". Можно включать обход.");
-            } finally { try { Directory.Delete(staging, true); } catch { } }
+            }
         }
         public void Rollback() {
             var previous = store.Settings.PreviousEngine;

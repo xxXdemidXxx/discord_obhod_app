@@ -369,6 +369,10 @@ namespace ZapretDesktop {
                 var root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".."));
                 var local = Path.GetFullPath(Path.Combine(root, "..", "zapret-discord-youtube-1.10.2"));
                 var official = Path.Combine(root, "downloads", "official-1.10.3", "zapret-discord-youtube-1.10.3");
+                if(args.Contains("--core-updates-only")){
+                    CoreUpdateTests(root,official).GetAwaiter().GetResult();Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);Core104UiTests(root,official);Console.WriteLine("PASS: "+count+" core update checks");return 0;
+                }
+                if(args.Contains("--core-network-only")){CoreNetworkTests(root,official).GetAwaiter().GetResult();Console.WriteLine("PASS: "+count+" live core update checks");return 0;}
                 if(args.Contains("--youtube-doh-only")){
                     System.Net.ServicePointManager.SecurityProtocol=System.Net.SecurityProtocolType.Tls12;
                     foreach(var target in ServiceChecks.Targets.Take(2)){
@@ -376,7 +380,7 @@ namespace ZapretDesktop {
                         Console.WriteLine(target.Name+": state="+result.State+", route="+result.DnsRoute+", "+result.Detail);if(result.State!=1)return 1;
                     }return 0;
                 }
-                local=official;YouTubeDnsFallbackTests(root).GetAwaiter().GetResult();YouTubeDnsTests(root).GetAwaiter().GetResult();StartupTests(root,official);SecurityTests(root,official);LegacyMigrationTest(root); DriverRecoveryTests(root); FeedbackAndDriverTests(root,official).GetAwaiter().GetResult(); SelectionTests().GetAwaiter().GetResult(); ServiceProbeTests().GetAwaiter().GetResult(); DomainTests(root); UpdateFeedTests().GetAwaiter().GetResult(); AppUpdateSessionTests(root).GetAwaiter().GetResult(); StageTests(root).GetAwaiter().GetResult(); ShellReplacementTest(root); ShellRollbackTest(root); ShellHandshakeTest(root);
+                local=official;YouTubeDnsFallbackTests(root).GetAwaiter().GetResult();YouTubeDnsTests(root).GetAwaiter().GetResult();StartupTests(root,official);SecurityTests(root,official);LegacyMigrationTest(root); DriverRecoveryTests(root); FeedbackAndDriverTests(root,official).GetAwaiter().GetResult(); SelectionTests().GetAwaiter().GetResult(); ServiceProbeTests().GetAwaiter().GetResult(); DomainTests(root); UpdateFeedTests().GetAwaiter().GetResult(); CoreUpdateTests(root,official).GetAwaiter().GetResult(); AppUpdateSessionTests(root).GetAwaiter().GetResult(); StageTests(root).GetAwaiter().GetResult(); ShellReplacementTest(root); ShellRollbackTest(root); ShellHandshakeTest(root);
                 foreach (var engine in new[] {local, official}.Distinct()) {
                     Strategy.ValidateEngine(engine);
                     var profiles = Directory.GetFiles(engine, "general*.bat"); Assert(profiles.Length == 22, "22 upstream profiles expected");
@@ -451,7 +455,7 @@ namespace ZapretDesktop {
                             pages.SelectedIndex = 0;
                         }
                         using (var image = new Bitmap(form.Width, form.Height)) { form.DrawToBitmap(image, new Rectangle(Point.Empty, form.Size)); image.Save(Path.Combine(root, "tests", "window.png")); }
-                        Assert(form.Controls.Count > 0, "Desktop UI constructed and rendered"); ProblemUiChecks(form,root); DiagnosticLogTests(store,root); InteractiveUiChecks(form,root); ResponsiveScreens(form,root); StartupUiTests(root,official);YouTubeDnsUiTests(root);SettingsAndHelpTests(form,store,root);AppUpdateUiTests(store,root); AutomaticUpdateTests(root,official); AppUpdateOutcomeUiTests(store);
+                        Assert(form.Controls.Count > 0, "Desktop UI constructed and rendered"); ProblemUiChecks(form,root); DiagnosticLogTests(store,root); InteractiveUiChecks(form,root); ResponsiveScreens(form,root); StartupUiTests(root,official);YouTubeDnsUiTests(root);SettingsAndHelpTests(form,store,root);AppUpdateUiTests(store,root); AutomaticUpdateTests(root,official); Core104UiTests(root,official); AppUpdateOutcomeUiTests(store);
                         var tabs = FindTabs(form);
                         for (int i = 1; i < tabs.TabPages.Count; i++) {
                             tabs.SelectedIndex = i; form.PerformLayout(); Application.DoEvents();
@@ -535,6 +539,72 @@ namespace ZapretDesktop {
             http=new MockHttp{Reply=url=>Response(200,new string('a',1024*1024+1))};
             using(var client=new System.Net.Http.HttpClient(http)){bool rejected=false;try{await GitHubMetadata.Get(client,"https://github.com/test/oversized");}catch(InvalidDataException){rejected=true;}Assert(rejected,"Oversized release metadata rejected");}
             Assert(ServiceChecks.Targets.Last().Url.StartsWith("https://github.com/"),"Strategy probes check GitHub availability without consuming API quota");
+        }
+        static string CoreMetadata(string version,string hash,long size) {
+            return UpstreamTrust.Serialize(new{tag_name=version,draft=false,prerelease=false,assets=new[]{new{name="zapret-discord-youtube-"+version+".zip",browser_download_url=UpstreamTrust.ArchiveUrl(version),digest="sha256:"+hash,size=size}}});
+        }
+        static async Task CoreNetworkTests(string root,string official) {
+            string folder=Path.Combine(root,"tests","fixture-live-core-"+Guid.NewGuid().ToString("N"));var store=new Store(folder);Copy(official,store.Current);store.Save();
+            try {
+                File.WriteAllText(Path.Combine(store.Current,"lists","list-general-user.txt"),"network-check.example\r\n");
+                using(var updater=new Updater(store)) {
+                    var release=await updater.Check();Assert(release.Version=="1.10.4","Live official latest is the requested 1.10.4 release");
+                    await updater.Install(release,Console.WriteLine);
+                    Assert(Updater.Version(store.Current)=="1.10.4" && File.ReadAllText(Path.Combine(store.Current,"lists","list-general-user.txt"))=="network-check.example\r\n","Live ZIP installs and preserves lists");
+                    UpstreamTrust.Clear();var inputs=EngineHost.ReadInputs(store.Current);
+                    Assert(inputs.ContainsKey(UpstreamTrust.ReceiptName),"Fresh helper state independently authenticates exact 1.10.4 metadata from GitHub");
+                    string snapshot=Path.Combine(folder,"snapshot");Directory.CreateDirectory(snapshot);EngineHost.WriteSnapshot(snapshot,inputs,false);Strategy.ValidateEngine(snapshot);
+                    Assert((string)Trust.VerifyEngine(snapshot)["version"]=="1.10.4","Live upstream core passes snapshot and strategy verification without launching its driver");
+                    updater.Rollback();Assert(Updater.Version(store.Current)=="1.10.3","Live core installation can roll back to 1.10.3");
+                }
+            }finally{UpstreamTrust.Clear();RemoveFixture(folder);}
+        }
+        static async Task CoreUpdateTests(string root,string official) {
+            string folder=Path.Combine(root,"tests","fixture-core-feed-"+Guid.NewGuid().ToString("N"));
+            var store=new Store(Path.Combine(folder,"app"));Copy(official,store.Current);store.Save();
+            string initial=store.Settings.Engine,settings=Path.Combine(store.Root,"data","settings.json"),before=Trust.Hash(settings);
+            UpstreamTrust.TestApprovalRoot=Path.Combine(folder,"approvals");UpstreamTrust.Clear();
+            try {
+                string future=Path.Combine(folder,"future");Copy(official,future);File.WriteAllText(Path.Combine(future,"service.bat"),"set LOCAL_VERSION=1.10.5\r\n");
+                string zip=Path.Combine(folder,"future.zip");ZipFile.CreateFromDirectory(future,zip);byte[] bytes=File.ReadAllBytes(zip);string hash=Trust.Hash(zip),metadata=CoreMetadata("1.10.5",hash,bytes.Length);
+                bool corrupt=false;int downloads=0,independentChecks=0;
+                UpstreamTrust.TestMetadata=version=>{independentChecks++;return metadata;};
+                var http=new MockHttp{Reply=url=>{
+                    if(url.EndsWith("/releases/latest"))return Response(200,metadata);
+                    Assert(url==UpstreamTrust.ArchiveUrl("1.10.5"),"Only official Flowseal release archive URLs are downloaded");downloads++;
+                    var content=(byte[])bytes.Clone();if(corrupt)content[0]^=1;
+                    return new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK){Content=new System.Net.Http.ByteArrayContent(content)};
+                }};
+                File.WriteAllText(Path.Combine(store.Current,".upstream-ipset.sha256"),Trust.Hash(Path.Combine(store.Current,"lists","ipset-all.txt")));
+                File.WriteAllText(Path.Combine(store.Current,"utils","game_filter.enabled"),"tcp\r\n");
+                using(var updater=new Updater(store,http)) {
+                    var release=await updater.Check();Assert(release.Version=="1.10.5" && http.Calls==1 && downloads==0,"Future upstream release is discovered directly without owner approval or a new shell");
+                    corrupt=true;bool rejected=false;try{await updater.Install(release,_=>{});}catch(InvalidDataException){rejected=true;}
+                    Assert(rejected && before==Trust.Hash(settings) && store.Settings.Engine==initial,"Corrupt download preserves installed core and settings");corrupt=false;
+                    using(var prepared=await updater.Prepare(release,_=>{})) {
+                        Assert(before==Trust.Hash(settings) && store.Settings.Engine==initial,"Archive validation finishes before switching the working core");
+                        File.WriteAllText(Path.Combine(store.Current,"lists","list-general-user.txt"),"last-edit.example\r\n");updater.Activate(prepared);
+                    }
+                    Assert(Updater.Version(store.Current)=="1.10.5" && Trust.VerifyEngine(store.Current)!=null,"A future core is verified against the official archive without an embedded catalogue entry");
+                    Assert(File.ReadAllText(Path.Combine(store.Current,"lists","list-general-user.txt"))=="last-edit.example\r\n" && File.ReadAllText(Path.Combine(store.Current,"utils","game_filter.enabled"))=="tcp\r\n","Latest user lists and game settings survive activation");
+                    UpstreamTrust.Clear();var inputs=EngineHost.ReadInputs(store.Current);
+                    Assert(independentChecks==1,"Fresh helper state independently fetches exact upstream release metadata");
+                    string receipt=System.Text.Encoding.UTF8.GetString(inputs[UpstreamTrust.ReceiptName]);
+                    Reject(()=>UpstreamTrust.AuthenticatedApproval(System.Text.Encoding.UTF8.GetBytes(receipt.Replace(hash,new string('a',64)))),"A local receipt cannot fabricate a privileged approval");
+                    string snapshot=Path.Combine(folder,"snapshot");Directory.CreateDirectory(snapshot);EngineHost.WriteSnapshot(snapshot,inputs,false);
+                    Assert(Trust.VerifyEngine(snapshot)!=null,"Snapshot independently validates copied immutable files");
+                    File.AppendAllText(Path.Combine(snapshot,"general.bat"),"tamper");Reject(()=>Trust.VerifyEngine(snapshot),"Modified strategy cannot be authorized by upstream receipt");
+                    Directory.CreateDirectory(UpstreamTrust.ApprovalRoot);string approval=UpstreamTrust.ApprovalPath(hash);File.WriteAllText(approval,receipt);UpstreamTrust.Clear();UpstreamTrust.TestMetadata=version=>{throw new IOException("Test offline");};
+                    bool refused=false;try{Trust.VerifyEngine(store.Current);}catch(IOException){refused=true;}Assert(refused,"User-writable approval files cannot authorize a core offline");
+                    UpstreamTrust.TestProtected=path=>true; // Simulate administrator-owned ACL only for this fixture.
+                    Assert(Trust.VerifyEngine(store.Current)!=null,"Persisted administrator approval allows offline verification after process restart");
+                    File.AppendAllText(Path.Combine(store.Current,"bin","winws.exe"),"tamper");Reject(()=>Trust.VerifyEngine(store.Current),"Offline approval still rejects changed executables");File.Copy(Path.Combine(official,"bin","winws.exe"),Path.Combine(store.Current,"bin","winws.exe"),true);
+                    string updated=store.Settings.Engine;updater.Rollback();Assert(Updater.Version(store.Current)=="1.10.3" && store.Settings.PreviousEngine==updated && File.ReadAllText(Path.Combine(store.Current,"lists","list-general-user.txt"))=="last-edit.example\r\n","Rollback restores old core while preserving current lists");
+                    Assert(Directory.GetDirectories(Path.Combine(store.Root,"data"),"staging-*").Length==0,"All download staging folders are cleaned up");
+                }
+                Assert(Updater.IsNewer("1.10.10","1.10.4") && !Updater.IsNewer("1.10.3","1.10.4") && !Updater.IsNewer("1.10.4","1.10.4"),"Version comparison prevents downgrades");
+                foreach(string bad in new[]{metadata.Replace("sha256:","sha512:"),metadata.Replace("github.com/Flowseal/","github.com/other/"),metadata.Replace("\"draft\":false","\"draft\":true"),metadata.Replace("\"prerelease\":false","\"prerelease\":true")})Reject(()=>UpstreamTrust.ParseRelease(bad),"Invalid or non-stable upstream release rejected");
+            }finally{UpstreamTrust.TestMetadata=null;UpstreamTrust.TestApprovalRoot=null;UpstreamTrust.TestProtected=null;UpstreamTrust.Clear();RemoveFixture(folder);}
         }
         sealed class ImmediateProgress : IProgress<int> {
             public Action<int> Changed;
@@ -715,6 +785,55 @@ namespace ZapretDesktop {
                 });worker.IsBackground=true;worker.SetApartmentState(ApartmentState.STA);worker.Start();
                 Assert(worker.Join(60000),"Automatic update finishes in the real WinForms message loop");if(failure!=null)throw failure;
             }finally{RemoveFixture(folder);}
+        }
+        static void Core104UiTests(string root,string official) {
+            string folder=Path.Combine(root,"tests","fixture-core104-ui-"+Guid.NewGuid().ToString("N"));var store=new Store(folder);Copy(official,store.Current);
+            store.Settings.CheckUpdates=false;store.Settings.AutoAppUpdates=false;store.Save();
+            File.WriteAllText(Path.Combine(store.Current,"lists","list-general-user.txt"),"upgrade.example\r\n");
+            File.WriteAllText(Path.Combine(store.Current,".upstream-ipset.sha256"),Trust.Hash(Path.Combine(store.Current,"lists","ipset-all.txt")));
+            byte[] archive=File.ReadAllBytes(Path.Combine(root,"downloads","zapret-discord-youtube-1.10.4.zip"));
+            var flags=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic;Exception failure=null;
+            var thread=new Thread(()=>{
+                try {
+                    using(var form=new MainForm(store,false,false,false,false,new ShellUpdates(new MockHttp{Reply=_=>Response(500,"")}),(title,message)=>true,new Updater(store,new MockHttp{AsyncReply=async(url,token)=>{
+                        if(url.EndsWith("/releases/latest"))return Response(200,CoreMetadata("1.10.4","291af673bd0238506f9548e0e94ca0abf244000f4c9a06960544fb01c5f97b34",archive.Length));
+                        await Task.Delay(300,token);return new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK){Content=new System.Net.Http.ByteArrayContent(archive)};
+                    }}))) {
+                        form.StartPosition=FormStartPosition.Manual;form.Location=new Point(-2500,-2500);
+                        form.Shown+=async(s,e)=>{
+                            var runner=(EngineRunner)typeof(MainForm).GetField("runner",flags).GetValue(form);bool failStart=false;int stops=0,starts=0;
+                            runner.ConflictCheck=()=>false;runner.TestStop=()=>stops++;runner.TestSync=(engine,strategy)=>{};
+                            runner.TestStart=(engine,strategy)=>{starts++;if(failStart && Updater.Version(engine)=="1.10.4")throw new EngineStartException("Тестовый отказ запуска нового ядра");};
+                            try {
+                                FindTabs(form).SelectedIndex=2;
+                                runner.Start(store.Current,store.Settings.Strategy);int initialStarts=starts;
+                                await (Task)typeof(MainForm).GetMethod("CheckUpdates",flags).Invoke(form,new object[]{false});
+                                var button=(Button)typeof(MainForm).GetField("install",flags).GetValue(form);
+                                Assert(button.Enabled && runner.Running,"Manual core installation is available while the owned bypass is connected");
+                                Capture(form,Path.Combine(root,"tests","window-core104-available.png"));
+                                var pending=(Task)typeof(MainForm).GetMethod("Install",flags).Invoke(form,null);
+                                Assert(runner.Running && stops==0 && store.Settings.Engine=="1.10.3","Core download keeps the old connection running and settings unchanged");
+                                Capture(form,Path.Combine(root,"tests","window-core104-downloading.png"));await pending;
+                                Assert(Updater.Version(store.Current)=="1.10.4" && runner.Running && starts==initialStarts+1 && stops==1,"Actual 1.10.3 to 1.10.4 installation switches once and restores connection through the test transport");
+                                Assert(new Store(folder).Settings.Engine==store.Settings.Engine && File.ReadAllText(Path.Combine(store.Current,"lists","list-general-user.txt"))=="upgrade.example\r\n","Real 1.10.4 ZIP activation preserves user lists and persists the new core");
+                                string snapshot=Path.Combine(folder,"verified-snapshot");Directory.CreateDirectory(snapshot);EngineHost.WriteSnapshot(snapshot,EngineHost.ReadInputs(store.Current),false);Strategy.ValidateEngine(snapshot);
+                                Assert((string)Trust.VerifyEngine(snapshot)["version"]=="1.10.4","Every 1.10.4 strategy parses and the privileged snapshot passes trust verification");
+                                Capture(form,Path.Combine(root,"tests","window-core104-installed.png"));
+                                runner.Stop();using(var updater=new Updater(store))updater.Rollback();typeof(MainForm).GetMethod("LoadSettings",flags).Invoke(form,null);runner.Start(store.Current,store.Settings.Strategy);
+                                string old=store.Settings.Engine,previous=store.Settings.PreviousEngine;
+                                await (Task)typeof(MainForm).GetMethod("CheckUpdates",flags).Invoke(form,new object[]{false});failStart=true;
+                                await (Task)typeof(MainForm).GetMethod("Install",flags).Invoke(form,null);
+                                Assert(store.Settings.Engine==old && store.Settings.PreviousEngine==previous && new Store(folder).Settings.Engine==old && runner.Running,"Failed new-core startup restores prior settings, previous-version history and the working connection");
+                                Capture(form,Path.Combine(root,"tests","window-core104-restored.png"));
+                            }catch(Exception ex){failure=ex;}
+                            finally{typeof(MainForm).GetField("exiting",flags).SetValue(form,true);form.Close();}
+                        };
+                        Application.Run(form);
+                    }
+                }catch(Exception ex){failure=ex;}
+            });thread.IsBackground=true;thread.SetApartmentState(ApartmentState.STA);thread.Start();
+            try{Assert(thread.Join(60000),"Core 1.10.4 UI scenarios complete in the real WinForms message loop");if(failure!=null)throw failure;}
+            finally{RemoveFixture(folder);}
         }
         static void ShellRollbackTest(string root){
             string folder=Path.Combine(root,"tests","fixture-rollback-"+Guid.NewGuid().ToString("N")),stage=Path.Combine(folder,"data","app-updates","probe");Directory.CreateDirectory(stage);
@@ -1080,11 +1199,11 @@ namespace ZapretDesktop {
                 var apiClient=(System.Net.Http.HttpClient)typeof(Updater).GetField("client",System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Instance).GetValue(updater);
                 TestApiCredential(apiClient);Release release;
                 try{release=await updater.Check();}finally{apiClient.DefaultRequestHeaders.Authorization=null;}
-                Assert(release.Version == "1.10.3", "Latest official release fetched");
+                Assert(release.Version == "1.10.4", "Latest official release fetched");
                 await updater.Install(release, Console.WriteLine);
                 Assert(Updater.Version(store.Current) == release.Version, "Verified official ZIP installed");
                 Assert(File.ReadAllText(Path.Combine(store.Current, "lists", "list-general-user.txt")) == "my-service.example\n", "User list survives real update");
-                updater.Rollback(); Assert(Updater.Version(store.Current) == "1.10.2", "Rollback after real update");
+                updater.Rollback(); Assert(Updater.Version(store.Current) == "1.10.3", "Rollback after real update");
             }
             using(var shell=new ShellUpdates()) {
                 Assert(await shell.Check()==null,"Installed shell version matches latest published release");

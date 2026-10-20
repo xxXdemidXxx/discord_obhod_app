@@ -83,7 +83,7 @@ namespace ZapretDesktop {
                 }
                 return entry;
             }
-            throw new InvalidDataException("Файлы ядра изменены или версия не проверена. Заново распакуйте официальный выпуск ByPass; ваши списки можно сохранить отдельно.");
+            return UpstreamTrust.VerifyEngine(root);
         }
         public static void VerifyShell(string proof,string exe,string config) {
             var payload=Verify(proof);
