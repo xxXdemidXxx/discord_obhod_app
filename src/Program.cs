@@ -223,7 +223,7 @@ namespace ZapretDesktop {
             loading=true;telegram.Checked=runner.TelegramRunning;discord.Checked=runner.Running;loading=false;starting=false;busy=false;if(!IsDisposed)RefreshState();
         }
         async Task StopOtherBypass(){
-            if(loading || externalBypass.Checked || busy || starting || scanning || testing)return;
+            if(loading || busy || starting || scanning || testing || !runner.Conflict)return;
             busy=true;RefreshState();
             try{await StopChecks();await Task.Run(()=>runner.StopExternal());InvalidateChecks("Другой обход остановлен · включите нужные сервисы");Append("Другой обход остановлен по запросу пользователя. Его файлы и автозапуск сохранены.");}
             catch(Exception ex){Error(ex);}finally{busy=false;if(!IsDisposed)RefreshState();}
@@ -390,7 +390,7 @@ namespace ZapretDesktop {
             if (IsDisposed) return;
             bool on = runner.Running, external = !on && runner.Conflict;
             startWindows.Enabled=!busy && !starting && !scanning && !testing && !dnsBusy && !appUpdates.Working && !external && !domainEditor.Dirty;
-            discord.Enabled=startWindows.Enabled;telegram.Enabled=!busy && !starting && !scanning && !testing && !dnsBusy && !appUpdates.Working; externalBypass.Enabled=!busy && !starting && !scanning && !testing; externalBypass.Visible=external;bool oldLoading=loading;loading=true;externalBypass.Checked=external;loading=oldLoading;
+            discord.Enabled=startWindows.Enabled;telegram.Enabled=!busy && !starting && !scanning && !testing && !dnsBusy && !appUpdates.Working; externalBypass.Enabled=external && !busy && !starting && !scanning && !testing;externalStatus.Text=external?"Обнаружен другой winws · можно остановить":"Другой обход не обнаружен";externalStatus.ForeColor=external?Theme.Warning:Theme.Muted;
             if(!starting){bool wasLoading=loading;loading=true;telegram.Checked=runner.TelegramRunning;discord.Checked=on;loading=wasLoading;}
             telegramStatus.Text=starting?"Применяем настройки…":runner.TelegramRunning?"Telegram работает отдельно\nЗвонки не поддерживаются":"Telegram не требует\nнастройки прокси";
             if(baseTray!=null){baseTray.Checked=on;baseTray.Enabled=discord.Enabled;telegramTray.Checked=runner.TelegramRunning;telegramTray.Enabled=telegram.Enabled;}
@@ -402,7 +402,7 @@ namespace ZapretDesktop {
             if(previouslyOn && !on && !scanning && !starting && !exiting) { InvalidateChecks("Ядро остановлено · проверка требуется заново"); if(checkCancellation!=null)checkCancellation.Cancel(); }
             previouslyOn=on;
             state.Text = scanning ? "Подбираем стратегию" : on ? (runner.TelegramRunning?"Оба обхода включены":"Discord и YouTube включены") : runner.TelegramRunning?"Telegram включён":external?"Другой обход запущен":"Сервисы выключены"; state.ForeColor=on || runner.TelegramRunning?Theme.Success:external?Theme.Warning:Theme.Text;
-            subtitle.Text = scanning ? (scanStep.Length>0?scanStep:"Проверяем сетевые пробы…") : on ? Theme.StrategyName(activeStrategy) : runner.TelegramRunning?"Основная стратегия выключена · Telegram работает отдельно":external?"Выключите тумблер «Другой обход», чтобы включить Discord и YouTube":"Включите нужный тумблер";
+            subtitle.Text = scanning ? (scanStep.Length>0?scanStep:"Проверяем сетевые пробы…") : on ? Theme.StrategyName(activeStrategy) : runner.TelegramRunning?"Основная стратегия выключена · Telegram работает отдельно":external?"Другой обход можно отключить в «Настройки»":"Включите нужный тумблер";
             profiles.Enabled = categories.Enabled = !busy && !starting && !scanning;
             games.Enabled = tcp.Enabled = udp.Enabled = saveGameButton.Enabled = !on && !external && !busy && !starting && !scanning; domainEditor.SetAllowed(!external && !busy && !starting && !scanning,on);
             dashboard.ScanMode.Enabled = !busy && !starting && !scanning;

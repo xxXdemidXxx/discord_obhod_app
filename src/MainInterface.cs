@@ -10,7 +10,7 @@ namespace ZapretDesktop {
         float windowScale=Theme.SystemScale; int Px(int value){return (int)Math.Round(value*windowScale);}
         protected override void ScaleControl(SizeF factor,BoundsSpecified specified){windowScale*=factor.Width;base.ScaleControl(factor,specified);}
         DomainEditor domainEditor;Button saveGameButton;Label gameSaved;bool expandedPorts;
-        ToggleOption telegram,discord,externalBypass; Label telegramStatus;
+        ToggleOption telegram,discord; Button externalBypass; Label telegramStatus,externalStatus;
         void BuildInterface() {
             ownerMark=Theme.Label("Проверяем подпись сборки…",8);ownerMark.Dock=DockStyle.Bottom;ownerMark.Height=Px(24);ownerMark.TextAlign=ContentAlignment.MiddleLeft;ownerMark.AutoEllipsis=true;
             Text="ByPass";ClientSize=new Size(Px(1100),Px(830));MinimumSize=new Size(Px(940),Px(690));FormBorderStyle=FormBorderStyle.None;ControlBox=false;ShowIcon=false;
@@ -24,8 +24,8 @@ namespace ZapretDesktop {
             tabs=new DarkTabs{Dock=DockStyle.Fill};Panel connection=Page("Подключение"),domains=Page("Дополнительно"),filters=Page("Настройки"),updates=Page("Обновления"),logs=Page("Журнал"),help=Page("Помощь");help.Controls.Add(ownerMark);tabs.AddPages(new[]{connection,filters,updates,logs,domains,help});Controls.Add(tabs);updateNotice=new UpdateNotice();updateNotice.ShellRequested+=async()=>await AppUpdateAction();updateNotice.CoreRequested+=async()=>await Install();Controls.Add(updateNotice);problemNotice=new ProblemNotice();problemNotice.Details.Click+=(s,e)=>tabs.SelectedIndex=3;Controls.Add(problemNotice);Controls.Add(titlebar);
             var connectionLayout=new TableLayoutPanel{Dock=DockStyle.Fill,ColumnCount=1,RowCount=2,Margin=Padding.Empty,Padding=Padding.Empty};connectionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));connectionLayout.RowStyles.Add(new RowStyle(SizeType.Absolute,Px(152)));connectionLayout.RowStyles.Add(new RowStyle(SizeType.Percent,100));connection.Controls.Add(connectionLayout);connectionLayout.Resize+=(s,e)=>connectionLayout.RowStyles[0].Height=Px(connectionLayout.Height<Px(650)?124:152);
             var status=new SurfacePanel{Dock=DockStyle.Fill,Margin=new Padding(0,0,0,Px(16))};state=Theme.Label("Сервисы выключены",15,true);subtitle=Theme.Label("Включите нужный тумблер",9);subtitle.ForeColor=Theme.Muted;status.Controls.AddRange(new Control[]{state,subtitle});
-            discord=new ToggleOption{Name="DiscordMessages",Text="Discord и YouTube"};telegram=new ToggleOption{Name="TelegramMessages",Text="Telegram (experimental)"};externalBypass=new ToggleOption{Name="ExternalBypass",Text="Другой обход"};telegramStatus=Theme.Label("",9);telegramStatus.ForeColor=Theme.Muted;
-            status.Controls.AddRange(new Control[]{discord,telegram,telegramStatus,externalBypass});status.Resize+=(s,e)=>{int p=status.Padding.Left;bool compact=status.Height<Px(120);int y=Px(compact?68:80),textWidth=status.Width-p*2-(externalBypass.Visible?Px(246):0);state.SetBounds(p,Px(12),Math.Max(Px(100),textWidth),Px(28));subtitle.SetBounds(p,Px(43),Math.Max(Px(100),textWidth),Px(26));discord.SetBounds(p,y,Px(242),Px(30));telegram.SetBounds(p+Px(254),y,Px(242),Px(30));telegramStatus.SetBounds(p+Px(520),y-Px(1),Math.Max(0,status.Width-p*2-Px(520)),Px(compact?34:44));externalBypass.SetBounds(status.Width-p-Px(230),Px(12),Px(230),Px(34));};telegram.CheckedChanged+=async(s,e)=>await SetTelegram();discord.CheckedChanged+=async(s,e)=>await SetDiscord();externalBypass.CheckedChanged+=async(s,e)=>await StopOtherBypass();
+            discord=new ToggleOption{Name="DiscordMessages",Text="Discord и YouTube"};telegram=new ToggleOption{Name="TelegramMessages",Text="Telegram (experimental)"};telegramStatus=Theme.Label("",9);telegramStatus.ForeColor=Theme.Muted;
+            status.Controls.AddRange(new Control[]{discord,telegram,telegramStatus});status.Resize+=(s,e)=>{int p=status.Padding.Left;bool compact=status.Height<Px(120);int y=Px(compact?68:80),textWidth=status.Width-p*2;state.SetBounds(p,Px(12),Math.Max(Px(100),textWidth),Px(28));subtitle.SetBounds(p,Px(43),Math.Max(Px(100),textWidth),Px(26));discord.SetBounds(p,y,Px(242),Px(30));telegram.SetBounds(p+Px(254),y,Px(242),Px(30));telegramStatus.SetBounds(p+Px(520),y-Px(1),Math.Max(0,status.Width-p*2-Px(520)),Px(compact?34:44));};telegram.CheckedChanged+=async(s,e)=>await SetTelegram();discord.CheckedChanged+=async(s,e)=>await SetDiscord();
             dashboard=new Dashboard{Dock=DockStyle.Fill,Margin=Padding.Empty};connectionLayout.Controls.Add(status,0,0);connectionLayout.Controls.Add(dashboard,0,1);profiles=dashboard.Profiles;categories=dashboard.Categories;checkSummary=dashboard.Summary;runChecks=dashboard.Check;checkStatuses=dashboard.Statuses;checkTimes=dashboard.Times;
             categories.SelectedIndexChanged+=(s,e)=>{if(!loading)FilterProfiles();};profiles.SelectedIndexChanged+=(s,e)=>{if(!loading && profiles.SelectedItem!=null && !scanning && !runner.Running)Guard(()=>{store.Settings.Strategy=profiles.SelectedItem.ToString();store.Save();});};dashboard.Apply.Click+=async(s,e)=>await ApplyStrategy();dashboard.Scan.Click+=async(s,e)=>{strategyFeedback.ResetRejected();await AutoSelect(false);};dashboard.Works.Click+=(s,e)=>Guard(ConfirmStrategy);dashboard.Next.Click+=async(s,e)=>{try{await NextStrategy();}catch(Exception ex){Error(ex);}};dashboard.Cancel.Click+=(s,e)=>{if(scanCancellation!=null)scanCancellation.Cancel();};dashboard.Check.Click+=async(s,e)=>await RunChecks();dashboard.Dns.Click+=async(s,e)=>await DiagnoseDns();dashboard.Pick+=name=>{if(scanning)return;categories.SelectedIndex=0;profiles.SelectedItem=name;};
             BuildAdvanced(domains);
@@ -48,7 +48,7 @@ namespace ZapretDesktop {
         void ShowAdvanced(bool gamesVisible){advancedGames=gamesVisible;sitePage.Visible=!gamesVisible;gamePage.Visible=gamesVisible;sitesSection.BackColor=gamesVisible?Theme.ButtonSurface:Theme.Accent;gamesSection.BackColor=gamesVisible?Theme.Accent:Theme.ButtonSurface;}
         void BuildFilters(Panel page){
             page.AutoScroll=true;
-            var layout=new TableLayoutPanel{Dock=DockStyle.Top,AutoSize=true,ColumnCount=1,RowCount=3,Margin=Padding.Empty};layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));
+            var layout=new TableLayoutPanel{Dock=DockStyle.Top,AutoSize=true,ColumnCount=1,RowCount=4,Margin=Padding.Empty};layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));
             var startupCard=new SurfacePanel{Name="StartupCard",Height=Px(214),Dock=DockStyle.Top,Margin=new Padding(0,0,0,Px(16))};
             var startupTitle=Theme.Label("Автозапуск",18,true);
             startWindows=new ToggleOption{Name="WindowsStartup",Text="Запускать при старте Windows"};
@@ -57,6 +57,11 @@ namespace ZapretDesktop {
             startupCard.Controls.AddRange(new Control[]{startupTitle,startWindows,startupStatus,startupHelp});
             startupCard.Resize+=(sender,e)=>{int p=startupCard.Padding.Left,w=startupCard.Width-p*2;startupTitle.SetBounds(p,p,w,Px(32));startWindows.SetBounds(p,p+Px(47),w,Px(34));startupStatus.SetBounds(p,p+Px(87),w,Px(24));startupHelp.SetBounds(p,p+Px(122),w,Px(52));};
             startWindows.CheckedChanged+=async(sender,e)=>await SetWindowsStartup();
+            var externalCard=new SurfacePanel{Name="ExternalBypassCard",Dock=DockStyle.Top,Height=Px(188),Margin=new Padding(0,0,0,Px(16))};
+            var externalTitle=Theme.Label("Другой обход",18,true);externalStatus=Theme.Label("Другой обход не обнаружен",9);externalStatus.ForeColor=Theme.Muted;
+            var externalHelp=Theme.Label("Останавливает обнаруженный winws и связанные службы.\nФайлы и настройки автозапуска остаются на месте.",9);externalHelp.ForeColor=Theme.Muted;
+            externalBypass=Theme.Button("Отключить другой обход");externalBypass.Name="StopExternalBypass";externalBypass.Click+=async(s,e)=>await StopOtherBypass();externalCard.Controls.AddRange(new Control[]{externalTitle,externalStatus,externalHelp,externalBypass});
+            externalCard.Resize+=(s,e)=>{int p=externalCard.Padding.Left,w=externalCard.Width-p*2;externalTitle.SetBounds(p,p,w,Px(32));externalStatus.SetBounds(p,p+Px(38),w,Px(24));externalHelp.SetBounds(p,p+Px(66),w,Px(42));externalBypass.SetBounds(p,p+Px(116),Math.Min(w,Px(300)),Px(40));};
             var appearance=new SurfacePanel{Name="AppearanceCard",Dock=DockStyle.Top,Height=Px(238),Margin=Padding.Empty};
             var title=Theme.Label("Оформление",18,true);var hint=Theme.Label("Три тёмные темы. Выбор применяется сразу и сохраняется.",9);hint.ForeColor=Theme.Muted;
             var choices=System.Linq.Enumerable.ToArray(System.Linq.Enumerable.Select(Theme.Presets,p=>new ThemeChoice(p)));
@@ -64,7 +69,7 @@ namespace ZapretDesktop {
             foreach(var choice in choices)choice.Click+=(sender,e)=>Guard(()=>ApplyVisualTheme(choice.Palette.Id));
             appearance.Resize+=(sender,e)=>{int p=appearance.Padding.Left,w=appearance.Width-p*2,gap=Px(12),width=(w-gap*2)/3;title.SetBounds(p,p,w,Px(32));hint.SetBounds(p,p+Px(39),w,Px(28));for(int i=0;i<choices.Length;i++)choices[i].SetBounds(p+i*(width+gap),p+Px(82),width,Px(116));};
             var shortcut=Theme.Button("Создать ярлык");shortcut.Margin=new Padding(0,Px(16),0,0);shortcut.Size=new Size(Px(210),Px(40));shortcut.Click+=(sender,e)=>Guard(()=>{AppShortcut.Create();shortcut.Text="Ярлык создан";});
-            layout.Controls.Add(startupCard,0,0);layout.Controls.Add(appearance,0,1);layout.Controls.Add(shortcut,0,2);page.Controls.Add(layout);
+            layout.Controls.Add(startupCard,0,0);layout.Controls.Add(externalCard,0,1);layout.Controls.Add(appearance,0,2);layout.Controls.Add(shortcut,0,3);page.Controls.Add(layout);
         }
         void ApplyVisualTheme(string id){
             var previous=Theme.Palette(Theme.Current);var next=Theme.Palette(id);string saved=store.Settings.VisualTheme;
