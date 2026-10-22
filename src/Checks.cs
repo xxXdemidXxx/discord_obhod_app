@@ -30,6 +30,9 @@ namespace ZapretDesktop {
         public string DnsRoute = "windows", SystemDnsFailure = "";
     }
     public static class ServiceChecks {
+#if TESTING
+        internal static Func<ServiceTarget,CancellationToken,Task<CheckResult>> TestRun=null;
+#endif
         public static readonly ServiceTarget[] Targets = {
             new ServiceTarget("YouTube · сайт", "https://www.youtube.com/"),
             new ServiceTarget("YouTube · изображения", "https://i.ytimg.com/vi/jNQXAC9IVRw/hqdefault.jpg"),
@@ -44,6 +47,9 @@ namespace ZapretDesktop {
             Uri url;return target.Kind==ProbeKind.Http && Uri.TryCreate(target.Url,UriKind.Absolute,out url) && url.Scheme=="https" && url.IsDefaultPort && url.UserInfo.Length==0 && (url.Host=="www.youtube.com" || url.Host=="i.ytimg.com");
         }
         public static Task<CheckResult> Run(ServiceTarget target, CancellationToken token, int timeoutSeconds = 12) {
+#if TESTING
+            if(TestRun!=null)return TestRun(target,token);
+#endif
             if(target.Kind==ProbeKind.Telegram)return TelegramProbe(token,timeoutSeconds);
             return RunWithDnsFallback(target,token,timeoutSeconds,
                 cancel=>Run(target,cancel,timeoutSeconds,DirectHandler(),CheckGateway),

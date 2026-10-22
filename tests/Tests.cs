@@ -46,6 +46,7 @@ namespace ZapretDesktop {
                     int starts=0,tgStarts=0;bool deny=false,denyBase=false,slowBase=false,slowTelegram=false;
                     runner.TestStart=(e,s)=>{if(slowBase)Thread.Sleep(600);if(denyBase){denyBase=false;throw new EngineStartException("Тестовый отказ Discord");}starts++;};runner.TestTelegram=(e,on)=>{if(slowTelegram)Thread.Sleep(600);if(on){if(deny){deny=false;throw new EngineStartException("Тестовый отказ Telegram");}tgStarts++;}};runner.TestStop=()=>{};runner.TestSync=(e,s)=>{};
                     var toggle=AllControls(form).OfType<ToggleOption>().Single(x=>x.Name=="TelegramMessages");
+                    Action<ToggleOption,bool> change=(control,value)=>{SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());control.Checked=value;};
                     Action wait=()=>{var watch=Stopwatch.StartNew();while((bool)typeof(MainForm).GetField("starting",flags).GetValue(form) && watch.ElapsedMilliseconds<10000){Application.DoEvents();Thread.Sleep(10);}Assert(!(bool)typeof(MainForm).GetField("starting",flags).GetValue(form),"Telegram change finishes asynchronously");};
                     foreach(var size in new[]{new Size(1100,830),new Size(940,690)}){form.ClientSize=new Size((int)(size.Width*Theme.SystemScale),(int)(size.Height*Theme.SystemScale));Application.DoEvents();Assert(toggle.Visible && toggle.Parent.ClientRectangle.Contains(toggle.Bounds),"Telegram switch fits window "+size);Capture(form,Path.Combine(root,"tests","window-telegram-off-"+size.Width+".png"));}
                     form.ClientSize=new Size((int)(1100*Theme.SystemScale),(int)(830*Theme.SystemScale));SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());toggle.Checked=true;wait();
@@ -61,26 +62,34 @@ namespace ZapretDesktop {
                     SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());discord.Checked=true;wait();
                     int priorStarts=starts;SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());toggle.Checked=false;wait();Assert(runner.Running && !runner.TelegramRunning && starts==priorStarts,"Telegram off does not reconnect Discord/YouTube");
                     SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());toggle.Checked=true;wait();tgConnections=tgStarts;runner.Stop();runner.Start(store.Current,"general.bat");runner.Stop();Assert(runner.TelegramRunning && tgStarts==tgConnections,"Strategy candidate start/stop operations preserve Telegram session");
-                    toggle.Checked=false;wait();
+                    change(toggle,false);wait();
                     using(var heartbeat=new System.Windows.Forms.Timer{Interval=25}){
                         int beats=0;heartbeat.Tick+=(s,e)=>beats++;heartbeat.Start();
-                        slowBase=true;SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());var click=Stopwatch.StartNew();discord.Checked=true;
+                        slowBase=true;var click=Stopwatch.StartNew();change(discord,true);
                         Assert(click.ElapsedMilliseconds<300 && toggle.Enabled,"Slow Discord start returns to UI and leaves Telegram switch usable");
-                        toggle.Checked=true;Capture(form,Path.Combine(root,"tests","window-services-pending.png"));wait();slowBase=false;
+                        change(toggle,true);Capture(form,Path.Combine(root,"tests","window-services-pending.png"));wait();slowBase=false;
                         Assert(beats>=3 && runner.Running && runner.TelegramRunning && discord.Checked && toggle.Checked,"Queued dual start keeps message loop responsive and enables both services");
                         Capture(form,Path.Combine(root,"tests","window-services-both.png"));
-                        discord.Checked=false;wait();toggle.Checked=false;wait();
-                        slowTelegram=true;beats=0;SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());toggle.Checked=true;
-                        Assert(discord.Enabled,"Slow Telegram start leaves Discord switch usable");discord.Checked=true;wait();slowTelegram=false;
+                        change(discord,false);wait();change(toggle,false);wait();
+                        slowTelegram=true;beats=0;change(toggle,true);
+                        Assert(discord.Enabled,"Slow Telegram start leaves Discord switch usable");change(discord,true);wait();slowTelegram=false;
                         Assert(beats>=3 && runner.Running && runner.TelegramRunning,"Reverse queued dual start also preserves both connections");
-                        deny=true;toggle.Checked=false;wait();toggle.Checked=true;wait();
+                        deny=true;change(toggle,false);wait();change(toggle,true);wait();
                         Assert(runner.Running && !runner.TelegramRunning && !toggle.Checked,"Failed Telegram start cannot stop already running Discord");
-                        toggle.Checked=true;wait();discord.Checked=false;wait();
-                        denyBase=true;discord.Checked=true;wait();Assert(!runner.Running && runner.TelegramRunning,"Failed Discord start cannot stop already running Telegram");
+                        change(toggle,true);wait();change(discord,false);wait();
+                        denyBase=true;change(discord,true);wait();Assert(!runner.Running && runner.TelegramRunning,"Failed Discord start cannot stop already running Telegram");
                         int uiThread=Thread.CurrentThread.ManagedThreadId,blockedStops=0;beats=0;
                         var selection=StrategySelector.Run(new[]{"fixture"},(name,token)=>Task.FromResult(0),()=>{if(Thread.CurrentThread.ManagedThreadId==uiThread)Interlocked.Increment(ref blockedStops);Thread.Sleep(120);},token=>Task.FromResult(new CheckResult[0]),CancellationToken.None,null,null);
                         var selectionWatch=Stopwatch.StartNew();while(!selection.IsCompleted && selectionWatch.ElapsedMilliseconds<5000){Application.DoEvents();Thread.Sleep(10);}selection.GetAwaiter().GetResult();
                         Assert(blockedStops==0 && beats>=3 && runner.TelegramRunning,"Strategy stop and cleanup run off UI thread and preserve Telegram");
+                        change(toggle,false);wait();int startedBeforeProbe=starts,tgBeforeProbe=tgStarts;var probed=new System.Collections.Generic.HashSet<string>();
+                        ServiceChecks.TestRun=(probeTarget,token)=>{probed.Add(probeTarget.Name);return Task.FromResult(new CheckResult{State=1,Informational=probeTarget.Kind==ProbeKind.Telegram,AvailableEndpoints=5,TotalEndpoints=5,Detail="Тестовая сетевая проба без включения обхода",Milliseconds=1});};
+                        try{
+                            SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());var manual=(Task)typeof(MainForm).GetMethod("RunChecks",flags).Invoke(form,null);Pump(manual);
+                            Assert(probed.Count==ServiceChecks.Targets.Length && !runner.Running && !runner.TelegramRunning && starts==startedBeforeProbe && tgStarts==tgBeforeProbe,"Manual service check probes all seven services with both bypasses off and does not enable them");
+                            Assert(dashboard.Statuses.All(x=>x.Text!="Выключен"),"Manual check renders actual probe results instead of skipped rows");Capture(form,Path.Combine(root,"tests","window-services-probed-off.png"));
+                        }finally{ServiceChecks.TestRun=null;}
+                        change(toggle,true);wait();
                     }
                     bool external=true;runner.ConflictCheck=()=>external;typeof(MainForm).GetMethod("RefreshState",flags).Invoke(form,null);Assert(toggle.Enabled && !discord.Enabled,"External bypass does not disable independent Telegram controls");
                     Assert(!AllControls(form).OfType<Button>().Any(x=>x.Text=="Включить" || x.Text=="Выключить"),"Global connect/disconnect button removed");
@@ -989,6 +998,7 @@ namespace ZapretDesktop {
             }finally{RemoveFixture(folder);}
         }
         static void InteractiveUiChecks(MainForm form,string root) {
+            SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
             var uiTimer=(System.Windows.Forms.Timer)typeof(MainForm).GetField("timer",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).GetValue(form);uiTimer.Stop();
             var tabs=FindTabs(form);tabs.SelectedIndex=0;var dashboard=AllControls(form).OfType<Dashboard>().Single();
             typeof(DarkSelect).GetMethod("OnClick",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).Invoke(dashboard.Profiles,new object[]{EventArgs.Empty});Application.DoEvents();
@@ -1004,7 +1014,7 @@ namespace ZapretDesktop {
             Assert(editor.Dirty && AllControls(editor).OfType<SlimScroll>().Any(x=>x.Visible),"Editor tracks unsaved text and shows thin scrollbar for long lists");
             using(var image=new Bitmap(form.Width,form.Height)){form.DrawToBitmap(image,new Rectangle(Point.Empty,form.Size));image.Save(Path.Combine(root,"tests","window-domain-scroll.png"));}
             editor.Discard();editor.TextEditor.Text="ui-save.example";var save=AllControls(editor).OfType<Button>().Single(x=>x.Text=="Сохранить");
-            if(save.Enabled){save.PerformClick();Application.DoEvents();Assert(!editor.Dirty && editor.TextEditor.Text.Contains("ui-save.example"),"Domain editor saves through actual UI event");}else editor.Discard();
+            if(save.Enabled){SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());save.PerformClick();var saved=Stopwatch.StartNew();while((bool)typeof(MainForm).GetField("starting",System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Instance).GetValue(form) && saved.ElapsedMilliseconds<5000){Application.DoEvents();Thread.Sleep(10);}Application.DoEvents();Assert(!editor.Dirty && editor.TextEditor.Text.Contains("ui-save.example") && !editor.TextEditor.ReadOnly,"Domain editor saves through actual asynchronous UI event and becomes editable again: dirty="+editor.Dirty+", readonly="+editor.TextEditor.ReadOnly+", elapsed="+saved.ElapsedMilliseconds);}else editor.Discard();
             if(save.Enabled || !editor.TextEditor.ReadOnly){
                 var siteInput=AllControls(editor).OfType<TextBox>().Single(x=>x.Name=="site-input");siteInput.Text="https://added-via-ui.example/path";AllControls(editor).OfType<Button>().Single(x=>x.Text=="Добавить").PerformClick();
                 Assert(editor.Dirty && editor.TextEditor.Text.Contains("added-via-ui.example"),"Pasted URL adds a site through the visible UI");editor.Discard();
