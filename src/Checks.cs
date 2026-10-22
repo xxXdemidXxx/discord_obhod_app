@@ -16,7 +16,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 namespace ZapretDesktop {
-    public enum ProbeKind { Http, DiscordApp, DiscordGateway, DiscordUpdates }
+    public enum ProbeKind { Http, DiscordApp, DiscordGateway, DiscordUpdates, Telegram }
     public sealed class ServiceTarget {
         public string Name, Url;
         public readonly ProbeKind Kind;
@@ -26,6 +26,7 @@ namespace ZapretDesktop {
         public int State; // 0: unavailable; 1: probe passed; 2: unexpected server response
         public string Detail; public long Milliseconds;
         public string Failure = "";
+        public bool Informational;public int AvailableEndpoints,TotalEndpoints;
         public string DnsRoute = "windows", SystemDnsFailure = "";
     }
     public static class ServiceChecks {
@@ -35,6 +36,7 @@ namespace ZapretDesktop {
             new ServiceTarget("Discord · приложение", "https://discord.com/app", ProbeKind.DiscordApp),
             new ServiceTarget("Discord · Gateway", "https://discord.com/api/v10/gateway", ProbeKind.DiscordGateway),
             new ServiceTarget("Discord · обновления", "https://updates.discord.com/distributions/app/manifests/latest?platform=win&channel=stable&arch=x64", ProbeKind.DiscordUpdates),
+            new ServiceTarget("Telegram · MTProto", "MTProto DC1–DC5", ProbeKind.Telegram),
             new ServiceTarget("GitHub · обновления", "https://github.com/xxXdemidXxx/discord_obhod_app/releases/latest")
         };
         static HttpClientHandler DirectHandler(){return new HttpClientHandler{UseProxy=false,AllowAutoRedirect=false,AutomaticDecompression=DecompressionMethods.GZip|DecompressionMethods.Deflate};}
@@ -42,9 +44,17 @@ namespace ZapretDesktop {
             Uri url;return target.Kind==ProbeKind.Http && Uri.TryCreate(target.Url,UriKind.Absolute,out url) && url.Scheme=="https" && url.IsDefaultPort && url.UserInfo.Length==0 && (url.Host=="www.youtube.com" || url.Host=="i.ytimg.com");
         }
         public static Task<CheckResult> Run(ServiceTarget target, CancellationToken token, int timeoutSeconds = 12) {
+            if(target.Kind==ProbeKind.Telegram)return TelegramProbe(token,timeoutSeconds);
             return RunWithDnsFallback(target,token,timeoutSeconds,
                 cancel=>Run(target,cancel,timeoutSeconds,DirectHandler(),CheckGateway),
                 cancel=>RunYouTubeDoH(target,cancel,timeoutSeconds));
+        }
+        internal static async Task<CheckResult> TelegramProbe(CancellationToken token,int timeoutSeconds){
+            var watch=Stopwatch.StartNew();using(var deadline=CancellationTokenSource.CreateLinkedTokenSource(token)){
+                deadline.CancelAfter(timeoutSeconds*1000);
+                var results=await Task.WhenAll(Enumerable.Range(1,5).Select(async dc=>{try{return new CheckResult{State=1,Detail=await TelegramWire.Bounded(TelegramWire.ProbeTcp(dc,deadline.Token),deadline.Token).ConfigureAwait(false)};}catch(Exception ex){if(!(ex is SocketException) && !(ex is IOException) && !(ex is OperationCanceledException) && !(ex is ObjectDisposedException))throw;return new CheckResult{State=0,Detail="DC"+dc+": "+(deadline.IsCancellationRequested?(token.IsCancellationRequested?"отменено":"тайм-аут"):ex.Message)};}})).ConfigureAwait(false);
+                int passed=results.Count(x=>x.State==1);return new CheckResult{State=passed==5?1:passed>0?2:0,Informational=true,AvailableEndpoints=passed,TotalEndpoints=5,Failure=deadline.IsCancellationRequested?"timeout":passed==5?"":"mtproto",Milliseconds=watch.ElapsedMilliseconds,Detail="Telegram: доступны "+passed+" из 5 дата-центров. "+(passed>0 && passed<5?"Сообщения могут работать через доступные DC; часть подключений и вложений может быть недоступна. ":"")+"Проверка транспорта не подтверждает отправку сообщений. | "+String.Join(" | ",results.Select(x=>x.Detail))};
+            }
         }
         internal static async Task<CheckResult> RunWithDnsFallback(ServiceTarget target,CancellationToken token,int timeoutSeconds,Func<CancellationToken,Task<CheckResult>> direct,Func<CancellationToken,Task<CheckResult>> doh){
             var watch=Stopwatch.StartNew();
@@ -239,11 +249,11 @@ namespace ZapretDesktop {
             }
             return new CheckResult { State = 0, Failure = failure, Detail = detail + " | " + error.GetBaseException().Message, Milliseconds = elapsed };
         }
-        public static async Task<CheckResult[]> Batch(CancellationToken token, Action<int, CheckResult> completed, int timeoutSeconds = 12) {
+        public static async Task<CheckResult[]> Batch(CancellationToken token, Action<int, CheckResult> completed, int timeoutSeconds = 12, Func<ServiceTarget,bool> enabled=null,CheckResult telegramSnapshot=null) {
             ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
             ServicePointManager.DnsRefreshTimeout = 0;
             return await Task.WhenAll(Targets.Select(async (target,index) => {
-                var result = await Run(target, token, timeoutSeconds);
+                var result = enabled!=null && !enabled(target)?new CheckResult{State=3,Detail="Обход сервиса выключен · проба пропущена"}:target.Kind==ProbeKind.Telegram && telegramSnapshot!=null?telegramSnapshot:await Run(target, token, timeoutSeconds);
                 token.ThrowIfCancellationRequested();
                 if (completed != null) completed(index,result);
                 return result;

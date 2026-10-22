@@ -19,6 +19,116 @@ namespace ZapretDesktop {
                 return new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(new{signed_payload=Convert.ToBase64String(bytes),signature=Convert.ToBase64String(key.SignData(bytes,System.Security.Cryptography.CryptoConfig.MapNameToOID("SHA256")))});
             }
         }
+        static void TelegramTests(string root,string official) {
+            string folder=Path.Combine(root,"tests","fixture-telegram-"+Guid.NewGuid().ToString("N"));
+            try {
+                var store=new Store(folder);Copy(official,store.Current);
+                var baseline=Strategy.Arguments(store.Current,"general.bat");
+                Assert(!TelegramFilter.Enabled(store.Current),"Telegram defaults off");
+                TelegramFilter.Set(store.Current,true);Trust.VerifyEngine(store.Current);
+                var inputs=EngineHost.ReadInputs(store.Current);Assert(inputs.ContainsKey(TelegramFilter.RelativePath),"Telegram flag crosses authenticated helper boundary");
+                string snapshot=Path.Combine(folder,"snapshot");Directory.CreateDirectory(snapshot);EngineHost.WriteSnapshot(snapshot,inputs,false);
+                foreach(string name in store.Strategies()) {
+                    var tokens=Strategy.Split(Strategy.Arguments(store.Current,name));int first=tokens.FindIndex(x=>x.StartsWith("--filter-"));
+                    Assert(tokens[first]=="--filter-tcp=80,443,5222" && tokens[first+1]=="--ipset-ip="+TelegramFilter.Networks,"Telegram profile precedes broad upstream filters: "+name);
+                    Assert(tokens[first+2]=="--new","Telegram transport bypasses winws desync: "+name);
+                    Assert(tokens.Any(x=>x.StartsWith("--wf-tcp=") && x.EndsWith(",80,443,5222")),"Capture includes Telegram ports: "+name);
+                }
+                string target=Path.Combine(folder,"target");Copy(official,target);Updater.Preserve(store.Current,target);Assert(TelegramFilter.Enabled(target),"Core update preserves Telegram mode");
+                TelegramFilter.Set(store.Current,false);Updater.Preserve(store.Current,target);Assert(!TelegramFilter.Enabled(target),"Core update preserves disabled Telegram mode");
+                EngineHost.WriteSnapshot(snapshot,EngineHost.ReadInputs(store.Current),true);Assert(!TelegramFilter.Enabled(snapshot),"Reused protected snapshot removes disabled Telegram flag");
+                Assert(Strategy.Arguments(store.Current,"general.bat")==baseline,"Disabling Telegram exactly restores upstream arguments");
+                store.Settings.CheckUpdates=store.Settings.AutoAppUpdates=false;store.Save();StartupService.TestRead=_=>new StartupState();
+                Application.EnableVisualStyles();
+                using(var form=new MainForm(store,false)) {
+                    form.Show();Application.DoEvents();var flags=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic;
+                    var runner=(EngineRunner)typeof(MainForm).GetField("runner",flags).GetValue(form);runner.ConflictCheck=()=>false;
+                    int starts=0,tgStarts=0;bool deny=false;runner.TestStart=(e,s)=>{starts++;};runner.TestTelegram=(e,on)=>{if(on){if(deny){deny=false;throw new EngineStartException("Тестовый отказ Telegram");}tgStarts++;}};runner.TestStop=()=>{};runner.TestSync=(e,s)=>{};
+                    var toggle=AllControls(form).OfType<ToggleOption>().Single(x=>x.Name=="TelegramMessages");
+                    Action wait=()=>{var watch=Stopwatch.StartNew();while((bool)typeof(MainForm).GetField("starting",flags).GetValue(form) && watch.ElapsedMilliseconds<10000){Application.DoEvents();Thread.Sleep(10);}Assert(!(bool)typeof(MainForm).GetField("starting",flags).GetValue(form),"Telegram change finishes asynchronously");};
+                    foreach(var size in new[]{new Size(1100,830),new Size(940,690)}){form.ClientSize=new Size((int)(size.Width*Theme.SystemScale),(int)(size.Height*Theme.SystemScale));Application.DoEvents();Assert(toggle.Visible && toggle.Parent.ClientRectangle.Contains(toggle.Bounds),"Telegram switch fits window "+size);Capture(form,Path.Combine(root,"tests","window-telegram-off-"+size.Width+".png"));}
+                    form.ClientSize=new Size((int)(1100*Theme.SystemScale),(int)(830*Theme.SystemScale));SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());toggle.Checked=true;wait();
+                    Assert(!runner.Running && runner.TelegramRunning && toggle.Checked && starts==0,"Telegram starts independently with the main engine off");Capture(form,Path.Combine(root,"tests","window-telegram-only.png"));
+                    SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());toggle.Checked=false;wait();Assert(!runner.Running && !runner.TelegramRunning && starts==0,"Telegram off does not start or stop the main engine");
+                    deny=true;SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());toggle.Checked=true;wait();Assert(!runner.TelegramRunning && !toggle.Checked && !TelegramFilter.Enabled(store.Current),"Failed Telegram start restores its own state only");Capture(form,Path.Combine(root,"tests","window-telegram-error.png"));
+                    SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());toggle.Checked=true;wait();int tgConnections=tgStarts;
+                    var discord=AllControls(form).OfType<ToggleOption>().Single(x=>x.Name=="DiscordMessages");
+                    SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());discord.Checked=true;wait();Assert(runner.Running && runner.TelegramRunning && tgStarts==tgConnections,"Base bypass starts without reconnecting Telegram");Capture(form,Path.Combine(root,"tests","window-telegram-on.png"));
+                    var dashboard=(Dashboard)typeof(MainForm).GetField("dashboard",flags).GetValue(form);int telegramIndex=Array.FindIndex(ServiceChecks.Targets,x=>x.Kind==ProbeKind.Telegram);dashboard.SetResult(telegramIndex,new CheckResult{State=2,Informational=true,AvailableEndpoints=2,TotalEndpoints=5,Milliseconds=5853,Detail="Тест: доступны 2/5 DC; сообщения могут работать, часть DC недоступна."});
+                    Assert(dashboard.Statuses[telegramIndex].Text=="Частично · 2/5 DC" && dashboard.Statuses[telegramIndex].ForeColor==Theme.Warning,"Partial Telegram status explains unavailable DCs and remains yellow");Capture(form,Path.Combine(root,"tests","window-telegram-partial.png"));
+                    SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());discord.Checked=false;wait();Assert(!runner.Running && runner.TelegramRunning && toggle.Checked && tgStarts==tgConnections,"Base bypass off keeps Telegram alive");
+                    SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());discord.Checked=true;wait();
+                    int priorStarts=starts;SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());toggle.Checked=false;wait();Assert(runner.Running && !runner.TelegramRunning && starts==priorStarts,"Telegram off does not reconnect Discord/YouTube");
+                    SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());toggle.Checked=true;wait();tgConnections=tgStarts;runner.Stop();runner.Start(store.Current,"general.bat");runner.Stop();Assert(runner.TelegramRunning && tgStarts==tgConnections,"Strategy candidate start/stop operations preserve Telegram session");
+                    bool external=true;runner.ConflictCheck=()=>external;typeof(MainForm).GetMethod("RefreshState",flags).Invoke(form,null);Assert(toggle.Enabled && !discord.Enabled,"External bypass does not disable independent Telegram controls");
+                    Assert(!AllControls(form).OfType<Button>().Any(x=>x.Text=="Включить" || x.Text=="Выключить"),"Global connect/disconnect button removed");
+                    var other=AllControls(form).OfType<ToggleOption>().Single(x=>x.Name=="ExternalBypass");Capture(form,Path.Combine(root,"tests","window-external-bypass.png"));
+                    runner.TestStopExternal=()=>{external=false;};SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());other.Checked=false;
+                    var stopWatch=Stopwatch.StartNew();while((bool)typeof(MainForm).GetField("busy",flags).GetValue(form) && stopWatch.ElapsedMilliseconds<5000){Application.DoEvents();Thread.Sleep(10);}Assert(!external && !other.Checked && toggle.Enabled && runner.TelegramRunning,"Stopping external bypass leaves Telegram alive");
+                    runner.ConflictCheck=()=>false;typeof(MainForm).GetMethod("Exit",flags).Invoke(form,null);
+                }
+            }finally{StartupService.TestRead=null;RemoveFixture(folder);}
+        }
+        static byte[] Hex(string value){return Enumerable.Range(0,value.Length/2).Select(i=>Convert.ToByte(value.Substring(i*2,2),16)).ToArray();}
+        static async Task TelegramCancellationTests(){
+            var failures=new System.Collections.Generic.List<string>();int failed=await TelegramWire.Warm(CancellationToken.None,failures.Add,(dc,token)=>Task.FromResult("DC"+dc+": fixture unavailable"));
+            Assert(failed==0 && failures.Any(x=>x.Contains("основная стратегия продолжает работать")),"All unavailable Telegram WSS routes are diagnostic and cannot throw a core setup failure");
+            using(var timeout=new CancellationTokenSource(80)){
+                int stalled=await TelegramWire.Warm(timeout.Token,null,(dc,token)=>new TaskCompletionSource<string>().Task);
+                Assert(stalled==0,"Unresponsive Telegram background probes obey deadline and do not fail core startup");
+            }
+            foreach(int dc in new[]{2,4})Assert(TelegramWire.Routes(dc,new[]{System.Net.IPAddress.Parse("149.154.167.99"),System.Net.IPAddress.Parse("149.154.167.99")}).Select(x=>x.ToString()).SequenceEqual(new[]{"149.154.167.220","149.154.167.99"}),"DC"+dc+" prefers proven alternate web endpoint before DNS, with duplicates removed");
+            Assert(TelegramWire.Routes(1,new System.Net.IPAddress[0]).Length==0 && TelegramWire.Routes(2,new System.Net.IPAddress[0]).Length==1,"Only verified DC2/DC4 alternate routes survive a DNS failure");
+            using(var deadline=new CancellationTokenSource(80)){
+                var never=new TaskCompletionSource<int>();var watch=Stopwatch.StartNew();bool cancelled=false;
+                try{await TelegramWire.Bounded(never.Task,deadline.Token);}catch(OperationCanceledException){cancelled=true;}
+                Assert(cancelled && watch.ElapsedMilliseconds<2000,"Telegram deadline completes even when underlying I/O ignores cancellation");
+                never.SetException(new IOException("late fixture failure"));
+            }
+            var listener=new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback,0);listener.Start();int port=((System.Net.IPEndPoint)listener.LocalEndpoint).Port,added=0,removed=0,registeredPort=0;
+            TelegramWire.SocketPort=(value,add)=>{if(add){Interlocked.Increment(ref added);registeredPort=value;}else Interlocked.Increment(ref removed);};
+            try{
+                for(int i=0;i<32;i++)using(var cancelled=new CancellationTokenSource()){
+                    cancelled.Cancel();bool correct=false;try{using(await TelegramWire.Dial(System.Net.IPAddress.Loopback,port,cancelled.Token)){}}catch(OperationCanceledException){correct=true;}
+                    Assert(correct,"Cancelled Telegram connect reports cancellation without TcpClient null race "+i);
+                }
+                var accept=listener.AcceptTcpClientAsync();using(var stream=await TelegramWire.Dial(System.Net.IPAddress.Loopback,port,CancellationToken.None))using(var peer=await accept){
+                    Assert(registeredPort==((System.Net.IPEndPoint)peer.Client.RemoteEndPoint).Port && added==removed+1,"Telegram source port is registered before connect and remains exempt while socket is alive");
+                    byte[] reply=new byte[1];IAsyncResult waiting=stream.BeginRead(reply,0,1,null,null);
+                    IAsyncResult sending=stream.BeginWrite(new byte[]{0x42},0,1,null,null);
+                    Assert(sending.AsyncWaitHandle.WaitOne(2000),"Pending APM receive cannot block outbound Telegram send");stream.EndWrite(sending);
+                    Assert((await ExactAsync(peer.GetStream(),1))[0]==0x42,"APM send reaches peer while receive is pending");await peer.GetStream().WriteAsync(new byte[]{0x24},0,1);
+                    Assert(waiting.AsyncWaitHandle.WaitOne(2000) && stream.EndRead(waiting)==1 && reply[0]==0x24,"APM duplex response completes without deadlock");
+                    byte[] payload=Enumerable.Range(0,65536).Select(i=>(byte)i).ToArray();var write=stream.WriteAsync(payload,0,payload.Length);var received=await ExactAsync(peer.GetStream(),payload.Length);await write;
+                    Assert(received.SequenceEqual(payload),"Pinned Telegram socket preserves full binary payload");stream.Dispose();stream.Dispose();
+                }
+                Assert(added==removed,"Telegram cancellation and repeated disposal balance socket exemptions exactly once");
+            }finally{TelegramWire.SocketPort=null;listener.Stop();}
+        }
+        static void TelegramTransportTests(string root,string official){
+            TelegramCancellationTests().GetAwaiter().GetResult();
+            using(var ctr=new TelegramCtr(Hex("2b7e151628aed2a6abf7158809cf4f3c"),Hex("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff")))Assert(ctr.Transform(Hex("6bc1bee22e409f96e93d7e117393172a")).SequenceEqual(Hex("874d6191b620e3261bef6864990db6ce")),"AES CTR matches independent NIST vector");
+            foreach(int id in new[]{1,2,3,4,5,-2,-4}){byte[] init=TelegramWire.Random(64);for(int i=56;i<60;i++)init[i]=0xef;Array.Copy(BitConverter.GetBytes((short)id),0,init,60,2);byte[] header=(byte[])init.Clone();using(var ctr=TelegramWire.Outgoing(init)){byte[] encrypted=ctr.Transform(init);Array.Copy(encrypted,56,header,56,8);}bool media;Assert(TelegramWire.Dc(header,out media)==Math.Abs(id) && media==(id<0),"Direct MTProto obfuscation DC/media extracted "+id);}
+            bool ignored;Reject(()=>TelegramWire.Dc(new byte[64],out ignored),"Non-MTProto stream is not routed to WSS");
+            foreach(string ip in new[]{"149.154.167.51","91.108.4.5","2001:b28:f23d::a","::ffff:149.154.167.51"})Assert(TelegramFilter.Contains(System.Net.IPAddress.Parse(ip)),"Telegram CIDR includes "+ip);
+            foreach(string ip in new[]{"127.0.0.1","10.0.0.1","8.8.8.8","2001:4860:4860::8888"})Assert(!TelegramFilter.Contains(System.Net.IPAddress.Parse(ip)),"Telegram CIDR excludes "+ip);
+            TelegramRedirector.ValidateFilter(Path.Combine(official,"bin","WinDivert.dll"));Assert(true,"Real WinDivert filter compiles without opening driver");
+            foreach(bool ipv6 in new[]{false,true}){
+                int tcp=ipv6?40:20,src=ipv6?8:12,dst=ipv6?24:16,size=ipv6?16:4;byte[] packet=new byte[tcp+20];packet[0]=(byte)(ipv6?0x60:0x45);packet[ipv6?6:9]=6;packet[tcp+12]=0x50;packet[src]=10;packet[dst]=149;TelegramRedirector.PutPort(packet,tcp,55000);TelegramRedirector.PutPort(packet,tcp+2,443);
+                byte[] address=new byte[80];address[8]=0;address[9]=0;address[10]=2;var routes=new System.Collections.Generic.Dictionary<int,int>{{49150,443}};
+                var original=(byte[])packet.Clone();Assert(!TelegramRedirector.Reflect(packet,packet.Length,address,routes,p=>p==55000) && packet.SequenceEqual(original),"WSS upstream socket is exempt from redirect IPv6="+ipv6);
+                Assert(TelegramRedirector.Reflect(packet,packet.Length,address,routes,p=>false) && TelegramRedirector.Port(packet,tcp+2)==49150 && packet[src]==149 && packet[dst]==10 && address[10]==0 && address[9]==0,"Telegram packet reflected inbound with correct WinDivert flags IPv6="+ipv6);
+                TelegramRedirector.Swap(packet,src,dst,size);TelegramRedirector.PutPort(packet,tcp,49150);TelegramRedirector.PutPort(packet,tcp+2,55000);address[10]=2;
+                Assert(TelegramRedirector.Reflect(packet,packet.Length,address,routes,p=>false) && TelegramRedirector.Port(packet,tcp)==443 && TelegramRedirector.Port(packet,tcp+2)==55000 && packet[src]==149 && packet[dst]==10,"Proxy response restores remote Telegram tuple IPv6="+ipv6);
+            }
+            var folder=Path.Combine(root,"tests","fixture-discord-"+Guid.NewGuid().ToString("N"));try{Copy(official,folder);var baseline=Strategy.Arguments(folder,"general.bat");DiscordFilter.Set(folder,false);TelegramFilter.Set(folder,true);
+                foreach(string name in Directory.GetFiles(folder,"general*.bat").Select(Path.GetFileName)){var args=Strategy.Arguments(folder,name);Assert(!args.Contains("--filter-l7=discord") && !args.Contains("--hostlist-domains=discord.media") && args.Contains("--hostlist-exclude-domains="+DiscordFilter.Domains) && args.Contains("--ipset-ip="+TelegramFilter.Networks),"Discord off and Telegram on are independent: "+name);}
+                var inputs=EngineHost.ReadInputs(folder);Assert(inputs.ContainsKey(DiscordFilter.RelativePath) && inputs.ContainsKey(TelegramFilter.RelativePath),"Both service settings cross helper boundary");
+                DiscordFilter.Set(folder,true);TelegramFilter.Set(folder,false);Assert(Strategy.Arguments(folder,"general.bat")==baseline,"Both default modes restore original upstream command");
+            }finally{RemoveFixture(folder);}
+            var skipped=Enumerable.Range(0,ServiceChecks.Targets.Length).Select(i=>new CheckResult{State=ServiceChecks.Targets[i].Kind==ProbeKind.Telegram?3:1}).ToArray();var candidate=new CandidateResult{Results=skipped};Assert(candidate.Complete && candidate.Total==ServiceChecks.Targets.Length-1,"Disabled Telegram is excluded from strategy selection criteria");
+            var informational=Enumerable.Range(0,ServiceChecks.Targets.Length).Select(i=>new CheckResult{State=ServiceChecks.Targets[i].Kind==ProbeKind.Telegram?2:1,Informational=ServiceChecks.Targets[i].Kind==ProbeKind.Telegram,Milliseconds=ServiceChecks.Targets[i].Kind==ProbeKind.Telegram?12000:10}).ToArray();var independent=new CandidateResult{Results=informational};Assert(independent.Complete && independent.Passed==6 && independent.Total==6 && independent.Latency==10,"Independent partial Telegram cannot reject or slow-rank the main strategy");
+        }
         static string Feed(string version){return Sign(RawFeed(version));}
         static Release ParseFixture(string json) {
             var serializer=new System.Web.Script.Serialization.JavaScriptSerializer();var data=serializer.Deserialize<System.Collections.Generic.Dictionary<string,object>>(json);
@@ -369,6 +479,7 @@ namespace ZapretDesktop {
                 var root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".."));
                 var local = Path.GetFullPath(Path.Combine(root, "..", "zapret-discord-youtube-1.10.2"));
                 var official = Path.Combine(root, "downloads", "official-1.10.3", "zapret-discord-youtube-1.10.3");
+                if(args.Contains("--telegram-only")){Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);TelegramTests(root,official);TelegramTransportTests(root,official);Console.WriteLine("PASS: "+count+" Telegram checks");return 0;}
                 if(args.Contains("--core-updates-only")){
                     CoreUpdateTests(root,official).GetAwaiter().GetResult();Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);Core104UiTests(root,official);Console.WriteLine("PASS: "+count+" core update checks");return 0;
                 }
@@ -443,7 +554,7 @@ namespace ZapretDesktop {
                     }
                     if (args.Contains("--network")) Network(store).GetAwaiter().GetResult();
                     store.Settings.CheckUpdates = false; store.Settings.AutoAppUpdates=false; store.Save();
-                    Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
+                    Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);TelegramTests(root,official);TelegramTransportTests(root,official);
                     using (var form = new MainForm(store, false)) {
                         form.StartPosition = FormStartPosition.Manual; form.Location = new Point(-2500, -2500); form.Show(); Application.DoEvents(); form.PerformLayout(); NativeFrameChecks(form,root);
                         if (args.Contains("--network")) {
@@ -684,7 +795,7 @@ namespace ZapretDesktop {
                 Assert(card.Action.Text=="Проверить обновления" && card.Action.Enabled && AllControls(card).OfType<Button>().Count(x=>x.Visible)==1,"Updates view starts with exactly one visible action");
                 Capture(form,Path.Combine(root,"tests","window-updates-idle.png"));
                 Pump(UpdateClick(form));Assert(card.Action.Text=="Обновить" && http.Calls==1,"Native update button changes to install without downloading");
-                Assert(form.Text=="ByPass" && AllControls(form).OfType<UpdateNotice>().Single().Visible && confirmations==0,"ByPass shows a quiet update notice without an automatic confirmation dialog");
+                Assert(form.Text.StartsWith("ByPass") && AllControls(form).OfType<UpdateNotice>().Single().Visible && confirmations==0,"ByPass shows a quiet update notice without an automatic confirmation dialog");
                 Pump(UpdateClick(form));Assert(confirmations==1 && http.Calls==1 && card.Action.Text=="Обновить","Declining the update makes no download request and keeps the available version");
                 var flags=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic;
                 var coreField=typeof(MainForm).GetField("release",flags);coreField.SetValue(form,new Release{Version="99.0.0"});
@@ -851,6 +962,7 @@ namespace ZapretDesktop {
             }finally{RemoveFixture(folder);}
         }
         static void InteractiveUiChecks(MainForm form,string root) {
+            var uiTimer=(System.Windows.Forms.Timer)typeof(MainForm).GetField("timer",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).GetValue(form);uiTimer.Stop();
             var tabs=FindTabs(form);tabs.SelectedIndex=0;var dashboard=AllControls(form).OfType<Dashboard>().Single();
             typeof(DarkSelect).GetMethod("OnClick",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).Invoke(dashboard.Profiles,new object[]{EventArgs.Empty});Application.DoEvents();
             var popup=(ToolStripDropDown)typeof(DarkSelect).GetField("popup",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).GetValue(dashboard.Profiles);

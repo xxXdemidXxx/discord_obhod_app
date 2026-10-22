@@ -13,7 +13,8 @@ namespace ZapretDesktop {
     public sealed class EngineRunner : IDisposable {
         NamedPipeServerStream pipe;Task reader;string helperHash;Timer observer;
         readonly object gate=new object();readonly AutoResetEvent response=new AutoResetEvent(false);
-        Dictionary<string,object> reply;volatile bool running,connected,ready;Exception failure;volatile string driverFailure;
+        Dictionary<string,object> reply;volatile bool running,connected,ready,telegramRunning;Exception failure;volatile string driverFailure;
+        internal bool TelegramRunning{get{return telegramRunning;}}
         public event Action<string> Log;
         volatile StartupState startup=new StartupState();
         internal bool StartupEnabled {get{return startup.Owned;}}
@@ -24,7 +25,8 @@ namespace ZapretDesktop {
         public bool Ready {get{return startup.Owned?startup.Running:running && ready;}} public string DriverFailure {get{return driverFailure;}}
 #if TESTING
         internal Func<bool> ConflictCheck=null; internal Action<bool,string,string> TestStartupChange=null;
-        internal Action<string,string> TestStart=null,TestSync=null;internal Action TestStop=null;
+        internal Action<string,string> TestStart=null,TestSync=null;internal Action TestStop=null,TestStopExternal=null;
+        internal Action<string,bool> TestTelegram=null;
 #endif
         public bool Conflict {
             get {
@@ -67,7 +69,7 @@ namespace ZapretDesktop {
                         if(!String.Equals(actual,expected,StringComparison.OrdinalIgnoreCase) || Trust.Hash(actual)!=helperHash)throw new InvalidDataException("Неизвестный компонент запуска.");
                     }
                     connected=true;failure=null;
-                    reader=Task.Run(()=>{try{while(connected){var message=HostWire.Read(pipe);string type=(string)message["type"];if(type=="reply"){reply=message;response.Set();}else if(type=="log"){string line=(string)message["text"];if(EngineDriverException.IsFailure(line))driverFailure=line;if(line.Contains("windivert initialized. capture is started."))ready=true;if(Log!=null)Log(line);}}}catch(Exception ex){failure=ex;connected=false;running=false;response.Set();}});
+                    reader=Task.Run(()=>{try{while(connected){var message=HostWire.Read(pipe);string type=(string)message["type"];if(type=="reply"){reply=message;response.Set();}else if(type=="log"){string line=(string)message["text"];if(EngineDriverException.IsFailure(line))driverFailure=line;if(line.Contains("windivert initialized. capture is started."))ready=true;if(Log!=null)Log(line);}}}catch(Exception ex){failure=ex;connected=false;running=false;telegramRunning=false;response.Set();}});
                     if(observer==null)observer=new Timer(_=>{if(!Monitor.TryEnter(gate))return;try{if(connected)Ask("status",null,null);}catch{running=false;}finally{Monitor.Exit(gate);}},null,800,800);
                 }
             }catch{connected=false;pipe.Dispose();pipe=null;throw;}
@@ -79,7 +81,7 @@ namespace ZapretDesktop {
                 HostWire.Write(pipe,new{action=action,engine=engine,strategy=strategy});
                 if(!response.WaitOne(45000)){connected=false;pipe.Dispose();running=false;throw new IOException("Компонент запуска не ответил.");}
                 if(reply==null)throw new IOException("Связь с компонентом запуска прервана.",failure);
-                running=Convert.ToBoolean(reply["running"]);RefreshStartup();if(!running)ready=false;string error=(string)reply["error"];
+                running=Convert.ToBoolean(reply["running"]);object tgState;telegramRunning=reply.TryGetValue("telegram_running",out tgState) && Convert.ToBoolean(tgState);RefreshStartup();if(!running)ready=false;string error=(string)reply["error"];
                 if(error.Length>0){object kind;if(reply.TryGetValue("error_kind",out kind) && (string)kind=="driver")throw new EngineDriverException(error);if(reply.TryGetValue("error_kind",out kind) && (string)kind=="setup")throw new EngineSetupException("Не удалось подготовить ядро.\n"+error);throw new EngineStartException(error);}
             }
         }
@@ -130,6 +132,18 @@ namespace ZapretDesktop {
                 await Task.Delay(100,token);
             }
         }
+        internal void SetTelegram(string engine,bool enabled){lock(gate){
+#if TESTING
+            if(TestTelegram!=null){TestTelegram(engine,enabled);telegramRunning=enabled;return;}
+#endif
+            if(enabled){Trust.VerifyEngine(engine);if(!String.Equals(Path.GetDirectoryName(Path.GetFullPath(engine)),Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"data","engines").TrimEnd('\\'),StringComparison.OrdinalIgnoreCase))throw new InvalidDataException("Ядро должно находиться в папке приложения.");}
+            if(!enabled && !connected){telegramRunning=false;return;}Connect();Ask(enabled?"telegram-start":"telegram-stop",enabled?Path.GetFileName(engine):null,null);
+        }}
+        internal void StopExternal(){lock(gate){
+#if TESTING
+            if(TestStopExternal!=null){TestStopExternal();return;}
+#endif
+            Connect();Ask("stop-external",null,null);}}
         public void Dispose(){if(observer!=null)observer.Dispose();lock(gate){try{if(connected)Ask("shutdown",null,null);}catch{}connected=false;if(pipe!=null)pipe.Dispose();if(reader!=null)try{reader.Wait(2000);}catch{}}response.Dispose();}
     }
 }

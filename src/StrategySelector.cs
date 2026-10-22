@@ -6,9 +6,10 @@ using System.Threading.Tasks;
 namespace ZapretDesktop {
     public sealed class CandidateResult {
         public string Strategy,Error="";public CheckResult[] Results=new CheckResult[0];public bool Confirmed;
-        public int Passed{get{return Results.Count(x=>x.State==1);}}
-        public bool Complete{get{return Results.Length==ServiceChecks.Targets.Length && Results.All(x=>x.State==1);}}
-        public double Latency{get{return Results.Length==0?Double.MaxValue:Results.Average(x=>(double)x.Milliseconds);}}
+        public int Passed{get{return Results.Count(x=>!x.Informational && x.State==1);}}
+        public int Total{get{return Results.Count(x=>!x.Informational && x.State!=3);}}
+        public bool Complete{get{return Results.Length==ServiceChecks.Targets.Length && Passed>0 && Results.All(x=>x.Informational || x.State==1 || x.State==3);}}
+        public double Latency{get{return Total==0?Double.MaxValue:Results.Where(x=>!x.Informational && x.State!=3).Average(x=>(double)x.Milliseconds);}}
     }
     public sealed class SelectionResult {public readonly List<CandidateResult> Candidates=new List<CandidateResult>();public CandidateResult Winner;}
     public static class StrategySelector {

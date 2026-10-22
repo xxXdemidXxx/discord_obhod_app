@@ -1,0 +1,5 @@
+using System;using System.Linq;using System.Net.Sockets;using System.Threading;using System.Threading.Tasks;using ZapretDesktop;
+class TelegramModesProbe {
+    static async Task<string> Probe(int dc,byte protocol,CancellationToken token){using(var client=new TcpClient())using(token.Register(()=>client.Close())){await client.ConnectAsync(TelegramWire.Addresses[dc-1],443);var stream=client.GetStream();return await TelegramWire.Exchange(dc,bytes=>stream.WriteAsync(bytes,0,bytes.Length,token),async()=>{byte[] bytes=new byte[4096];int count=await stream.ReadAsync(bytes,0,bytes.Length,token);if(count==0)throw new System.IO.EndOfStreamException();return bytes.Take(count).ToArray();},protocol);}}
+    static int Main(){int success=0;foreach(byte mode in new byte[]{0xef,0xee,0xdd})foreach(int dc in new[]{1,2,3,4,5})using(var deadline=new CancellationTokenSource(15000)){try{Console.WriteLine(mode.ToString("x2")+" "+Probe(dc,mode,deadline.Token).GetAwaiter().GetResult());success++;}catch(Exception ex){Console.WriteLine(mode.ToString("x2")+" DC"+dc+": "+ex.GetBaseException().Message);}}return success==15?0:1;}
+}

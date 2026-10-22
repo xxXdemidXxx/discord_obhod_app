@@ -116,6 +116,10 @@ namespace ZapretDesktop {
             var tokens = Split(expanded);
             if (tokens.Count == 0 || tokens.Any(x => !x.StartsWith("--", StringComparison.Ordinal)))
                 throw new InvalidDataException("Неподдерживаемый формат параметров стратегии.");
+            if (!DiscordFilter.Enabled(engine)) DiscordFilter.Apply(tokens);
+            // The base strategy always leaves MTProto/WSS untouched. Telegram
+            // can then start/stop without restarting or rewriting this process.
+            TelegramFilter.Apply(tokens);
             return String.Join(" ", tokens.Select(Quote));
         }
         public static void GamePorts(string engine, out string tcp, out string udp) {
@@ -162,6 +166,54 @@ namespace ZapretDesktop {
                     if (Path.IsPathRooted(value) && !File.Exists(value)) throw new InvalidDataException("Стратегия ссылается на отсутствующий файл: " + value);
                 }
             }
+        }
+    }
+
+    // Shell-owned experiment, independent of the upstream BAT strategies.
+    public static class TelegramFilter {
+        public const string RelativePath = "utils/telegram_filter.enabled";
+        // https://core.telegram.org/resources/cidr.txt, reviewed 2026-10-21.
+        // Additional bootstrap address from official tdesktop mtproto_dc_options.cpp.
+        public const string Networks = "91.108.56.0/22,91.108.4.0/22,91.108.8.0/22,91.108.16.0/22,91.108.12.0/22,149.154.160.0/20,91.105.192.0/23,91.108.20.0/22,185.76.151.0/24,2001:b28:f23d::/48,2001:b28:f23f::/48,2001:67c:4e8::/48,2001:b28:f23c::/48,2a0a:f280::/32,95.161.76.100/32";
+        internal static string AddressFilter(string direction){
+            if(direction!="Src" && direction!="Dst")throw new ArgumentException("direction");
+            return String.Join(" or ",Networks.Split(',').Select(item=>{var pair=item.Split('/');byte[] start=System.Net.IPAddress.Parse(pair[0]).GetAddressBytes(),end=(byte[])start.Clone();int bits=Int32.Parse(pair[1]);for(int i=0;i<start.Length;i++,bits-=8){int mask=bits>=8?255:bits<=0?0:255<<(8-bits);start[i]=(byte)(start[i]&mask);end[i]=(byte)(start[i]|(~mask&255));}string field=(start.Length==4?"ip.":"ipv6.")+direction+"Addr";return "("+field+" >= "+new System.Net.IPAddress(start)+" and "+field+" <= "+new System.Net.IPAddress(end)+")";}));
+        }
+        public static bool Enabled(string engine) { return File.Exists(Path.Combine(engine, RelativePath)); }
+        public static bool Contains(System.Net.IPAddress address) {
+            if(address.IsIPv4MappedToIPv6)address=address.MapToIPv4();byte[] bytes=address.GetAddressBytes();
+            foreach(string item in Networks.Split(',')){var pair=item.Split('/');byte[] network=System.Net.IPAddress.Parse(pair[0]).GetAddressBytes();if(bytes.Length!=network.Length)continue;int bits=Int32.Parse(pair[1]);bool match=true;for(int i=0;i<bytes.Length && bits>0;i++,bits-=8){int mask=255<<(8-Math.Min(bits,8));if((bytes[i]&mask)!=(network[i]&mask)){match=false;break;}}if(match)return true;}return false;
+        }
+        public static void Set(string engine, bool enabled) {
+            string path = Path.Combine(engine, RelativePath); Trust.NoLinks(path);
+            if (!enabled) { if (File.Exists(path)) File.Delete(path); return; }
+            Directory.CreateDirectory(Path.GetDirectoryName(path));
+            File.WriteAllText(path, "telegram-tcp-split-v1\r\n", new UTF8Encoding(false));
+        }
+        internal static void Apply(List<string> tokens) {
+            int capture = tokens.FindIndex(x => x.StartsWith("--wf-tcp=", StringComparison.Ordinal));
+            int first = tokens.FindIndex(x => x.StartsWith("--filter-", StringComparison.Ordinal));
+            if (capture < 0 || first < 0 || capture >= first || tokens.Any(x => x.StartsWith("--wf-raw", StringComparison.Ordinal)))
+                throw new InvalidDataException("Стратегия не поддерживает тестовый режим Telegram. Выберите другую стратегию.");
+            tokens[capture] += ",80,443,5222";
+            // First match wins: place this before broad GameFilter/IPSet profiles.
+            // Numeric offsets work for obfuscated MTProto without HTTP host or TLS SNI.
+            // The separate WSS bridge owns MTProto. Keep winws from desyncing it.
+            tokens.InsertRange(first, new[] { "--filter-tcp=80,443,5222", "--ipset-ip=" + Networks, "--new" });
+        }
+    }
+
+    public static class DiscordFilter {
+        public const string RelativePath="utils/discord_filter.disabled";
+        public const string Domains="discord.com,discord.gg,discordapp.com,discordapp.net,discord.media,discordcdn.com,discord.gift,discordstatus.com";
+        public static bool Enabled(string engine){return !File.Exists(Path.Combine(engine,RelativePath));}
+        public static void Set(string engine,bool enabled){string path=Path.Combine(engine,RelativePath);Trust.NoLinks(path);if(enabled){if(File.Exists(path))File.Delete(path);}else{Directory.CreateDirectory(Path.GetDirectoryName(path));File.WriteAllText(path,"disabled\r\n");}}
+        internal static void Apply(List<string> tokens){
+            int start=tokens.FindIndex(x=>x.StartsWith("--filter-",StringComparison.Ordinal));if(start<0)throw new InvalidDataException("В стратегии нет профилей.");
+            var result=tokens.Take(start).ToList();var profile=new List<string>();
+            Action flush=()=>{if(profile.Count==0)return;if(!profile.Any(x=>x.StartsWith("--filter-l7=discord") || x=="--hostlist-domains=discord.media")){if(result.Count>start)result.Add("--new");result.AddRange(profile);result.Add("--hostlist-exclude-domains="+Domains);}profile.Clear();};
+            foreach(string token in tokens.Skip(start)){if(token=="--new")flush();else profile.Add(token);}flush();
+            tokens.Clear();tokens.AddRange(result);
         }
     }
 

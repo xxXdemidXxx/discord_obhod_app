@@ -1,6 +1,6 @@
-param([switch]$Network,[switch]$CoreUpdatesOnly)
+param([switch]$Network,[switch]$CoreUpdatesOnly,[switch]$TelegramOnly)
 $ErrorActionPreference = 'Stop'
-if(-not $CoreUpdatesOnly){
+if(-not $CoreUpdatesOnly -and -not $TelegramOnly){
     & "$PSScriptRoot\tests\PortableKeyTests.ps1"
     & "$PSScriptRoot\tests\ReleaseFlowTests.ps1"
     & "$PSScriptRoot\tools\test-owner-assistant.ps1"
@@ -34,5 +34,5 @@ if ($LASTEXITCODE -ne 0) { throw 'Update probe build failed' }
 $legacy=@('tests\legacy-0.4\ShellUpdates.cs','src\Updates.cs','src\Engine.cs','src\Trust.cs','src\UpstreamTrust.cs','src\OwnerIdentity.cs','src\OwnedJob.cs','src\GitHubMetadata.cs','tests\LegacyBridge.cs') | ForEach-Object {Join-Path $PSScriptRoot $_}
 & $compiler /nologo /target:exe /main:LegacyBridge /platform:x64 @resources "/out:$PSScriptRoot\tests\LegacyBridge.exe" /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.ServiceProcess.dll /reference:System.Web.Extensions.dll /reference:System.Net.Http.dll /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll $legacy
 if ($LASTEXITCODE -ne 0) {throw 'Legacy updater bridge build failed'}
-if($CoreUpdatesOnly){& $output --core-updates-only} elseif ($Network) { & $output --network } else { & $output }
+if($TelegramOnly){& $output --telegram-only} elseif($CoreUpdatesOnly){& $output --core-updates-only} elseif ($Network) { & $output --network } else { & $output }
 if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }

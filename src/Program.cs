@@ -41,7 +41,8 @@ namespace ZapretDesktop {
         [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr handle, int message, IntPtr wParam, IntPtr lParam);
         readonly Store store; readonly StrategyFeedback strategyFeedback; readonly EngineRunner runner = new EngineRunner(); readonly Updater updater;
         Color background {get{return Theme.Background;}} Color card {get{return Theme.Surface;}} Color muted {get{return Theme.Muted;}} Color accent {get{return Theme.Accent;}}
-        Label state, subtitle, version, updateText; Button connect, install, rollback, check;
+        Label state, subtitle, version, updateText; Button install, rollback, check;
+        ToolStripMenuItem baseTray,telegramTray;
         DarkSelect profiles, categories, games; CheckBox autoCheck; TextBox tcp, udp, log;
         Label[] checkStatuses, checkTimes; Label checkSummary; Button runChecks;
         DarkTabs tabs; bool starting;
@@ -70,7 +71,7 @@ namespace ZapretDesktop {
             BuildInterface();if(startInTray){Opacity=0;ShowInTaskbar=false;Shown+=(s,e)=>{Hide();Opacity=1;};}
             if(fullScan)dashboard.ScanMode.SelectedIndex=1;
             tray = new NotifyIcon { Icon = Icon, Text = "ByPass — выключен", Visible = true };
-            var menu = new ContextMenuStrip(); menu.Items.Add("Открыть", null, (s,e) => Restore()); menu.Items.Add("Включить / выключить", null, async (s,e) => await Toggle()); menu.Items.Add("Выход", null, (s,e) => Exit()); tray.ContextMenuStrip = menu; tray.DoubleClick += (s,e) => Restore();
+            var menu = new ContextMenuStrip(); menu.Items.Add("Открыть", null, (s,e) => Restore());baseTray=new ToolStripMenuItem("Discord и YouTube");telegramTray=new ToolStripMenuItem("Telegram (experimental)");baseTray.Click+=(s,e)=>{if(discord.Enabled)discord.Checked=!discord.Checked;};telegramTray.Click+=(s,e)=>{if(telegram.Enabled)telegram.Checked=!telegram.Checked;};menu.Items.Add(baseTray);menu.Items.Add(telegramTray); menu.Items.Add("Выход", null, (s,e) => Exit()); tray.ContextMenuStrip = menu; tray.DoubleClick += (s,e) => Restore();
             runner.Log += Append; timer = new System.Windows.Forms.Timer { Interval = 800 };
             timer.Tick += async (s,e) => await PollStartup();timer.Start();
             appUpdates.Changed+=AppUpdateChanged;
@@ -83,9 +84,13 @@ namespace ZapretDesktop {
             if(outcome!=null){if(outcome.Success && outcome.Version==ShellUpdates.Current)appUpdates.Complete();else {appUpdates.Fail("Обновление не установлено. Текущая версия сохранена.");Append("Установка обновления: "+outcome.Error);}tabs.SelectedIndex=2;}
             Shown += async (s,e) => {
                 Append("ByPass "+ShellUpdates.Current+". Ядро "+Updater.Version(store.Current));
+                Append("Telegram: независимый WSS-мост · FileVersion "+AppVersion.Value);
                 bool earlyUpdates=store.Settings.AutoInstallShell || store.Settings.AutoInstallCore;
                 if(earlyUpdates){if((store.Settings.AutoAppUpdates || store.Settings.AutoInstallShell) && !updateOutcome)await CheckShell(true);if(IsDisposed || exiting)return;if(store.Settings.CheckUpdates || store.Settings.AutoInstallCore)await CheckUpdates(true);if(IsDisposed || exiting)return;}
                 if(auto)await AutoSelect(restoreConnection);else if(start)await ApplyStrategy();
+                if(TelegramFilter.Enabled(store.Current)){
+                    busy=true;try{await Task.Run(()=>runner.SetTelegram(store.Current,true));}catch(Exception ex){Error(ex);}finally{busy=false;RefreshState();}
+                }
                 if(!earlyUpdates && !IsDisposed && store.Settings.AutoAppUpdates && !updateOutcome)await CheckShell(true);
                 if(!earlyUpdates && !IsDisposed && store.Settings.CheckUpdates)await CheckUpdates(true);
             };
@@ -126,6 +131,7 @@ namespace ZapretDesktop {
                 autoShell.Checked = store.Settings.AutoAppUpdates; domainEditor.LoadEngine(store.Current);
                 autoInstallShell.Checked=store.Settings.AutoInstallShell;autoInstallCore.Checked=store.Settings.AutoInstallCore;
                 startWindows.Checked=runner.StartupEnabled;
+                telegram.Checked=runner.TelegramRunning;discord.Checked=runner.Running;
             } finally { loading = false; RefreshState(); }
         }
         async Task PollStartup(){
@@ -190,13 +196,37 @@ namespace ZapretDesktop {
             }
             runner.SyncStartup(store.Current,store.Settings.Strategy);Append("Настройки GameFilter сохранены.");
         }
-        async Task Toggle() {
-            if (busy || starting) return;
-            if(scanning){stopAfterScan=true;if(scanCancellation!=null)scanCancellation.Cancel();return;}
+        async Task SetTelegram(){await SetService(false);}
+        async Task SetDiscord(){await SetService(true);}
+        async Task SetService(bool discordMode) {
+            if(loading)return;
+            var option=discordMode?discord:telegram;bool enabled=option.Checked,previous=discordMode?runner.Running:runner.TelegramRunning,previousFlag=discordMode?DiscordFilter.Enabled(store.Current):TelegramFilter.Enabled(store.Current),reconnect=runner.Running;
+            if(busy || starting || scanning || testing || dnsBusy || appUpdates.Working || (discordMode && (runner.Conflict || domainEditor.Dirty))){loading=true;option.Checked=previous;loading=false;return;}
+            string strategy=reconnect?activeStrategy:store.Settings.Strategy;
+            problemNotice.Clear();starting=true;busy=true;RefreshState();
+            Exception failure=null;
             try {
-                if(runner.Running){starting=true;InvalidateChecks("Обход выключен · запустите новую проверку");await StopChecks();runner.Stop();return;}
-                await ApplyStrategy();
-            }catch(Exception ex){Error(ex);}finally{starting=false;if(!IsDisposed)RefreshState();}
+                InvalidateChecks("Режим "+(discordMode?"Discord":"Telegram")+" изменён · проверка требуется заново");await StopChecks();
+                if(discordMode){
+                    await Task.Run(()=>DiscordFilter.Set(store.Current,enabled));
+                    if(enabled)await StartEngine(strategy,CancellationToken.None);else await Task.Run(()=>runner.Stop());
+                }else await Task.Run(()=>{TelegramFilter.Set(store.Current,enabled);runner.SetTelegram(store.Current,enabled);});
+                Append((discordMode?"Discord и YouTube":"Telegram")+(enabled?": обход включён.":": обход выключен."));
+            }catch(Exception ex){failure=ex;}
+            if(failure!=null){
+                Error(failure);
+                try {
+                    if(discordMode){await Task.Run(()=>{runner.Stop();DiscordFilter.Set(store.Current,previousFlag);});if(previous)await StartEngine(strategy,CancellationToken.None);}
+                    else await Task.Run(()=>{TelegramFilter.Set(store.Current,previousFlag);runner.SetTelegram(store.Current,previous);});
+                }catch(Exception recovery){Error(recovery);}
+            }
+            loading=true;telegram.Checked=runner.TelegramRunning;discord.Checked=runner.Running;loading=false;starting=false;busy=false;if(!IsDisposed)RefreshState();
+        }
+        async Task StopOtherBypass(){
+            if(loading || externalBypass.Checked || busy || starting || scanning || testing)return;
+            busy=true;RefreshState();
+            try{await StopChecks();await Task.Run(()=>runner.StopExternal());InvalidateChecks("Другой обход остановлен · включите нужные сервисы");Append("Другой обход остановлен по запросу пользователя. Его файлы и автозапуск сохранены.");}
+            catch(Exception ex){Error(ex);}finally{busy=false;if(!IsDisposed)RefreshState();}
         }
         async Task ApplyStrategy() {
             if(busy || starting || scanning)return;
@@ -213,10 +243,11 @@ namespace ZapretDesktop {
         }
         async Task StartEngine(string strategy,CancellationToken token) {
             token.ThrowIfCancellationRequested();await Task.Delay(150,token);
-            activeStrategy=strategy;await Task.Run(()=>runner.Start(store.Current,strategy));RefreshState();
+            activeStrategy=strategy;await Task.Run(()=>{DiscordFilter.Set(store.Current,true);runner.Start(store.Current,strategy);});RefreshState();
             try{await EngineRunner.WaitForReady(()=>runner.Running,()=>runner.Ready,token,10000,()=>runner.DriverFailure);}catch{runner.Stop();throw;}
             if(!runner.Running)throw new IOException("Ядро завершилось после запуска. Подробности в журнале.");
         }
+        bool CheckEnabled(ServiceTarget target){return target.Kind==ProbeKind.Telegram?runner.TelegramRunning:target.Name.StartsWith("GitHub") || runner.Running;}
         void InvalidateChecks(string reason) {checkEpoch++;dashboard.ClearResults(reason);}
         async Task StopChecks() {
             if(checkCancellation!=null)checkCancellation.Cancel();
@@ -235,17 +266,18 @@ namespace ZapretDesktop {
             Append("Порядок подбора: "+String.Join(" → ",names));
             try {
                 InvalidateChecks("Автоподбор начинается…");await StopChecks();runner.Stop();
+                var tgSnapshot=runner.TelegramRunning?await ServiceChecks.TelegramProbe(token,12):null;
                 var result=await StrategySelector.Run(names,
                     async (name,cancel)=>{InvalidateChecks("Проверяется: "+name.Replace(".bat",""));await StartEngine(name,cancel);},
                     ()=>runner.Stop(),
-                    async cancel=>await ServiceChecks.Batch(cancel,(index,item)=>{if(!IsDisposed)dashboard.SetResult(index,item);},quick?6:12),token,
+                    async cancel=>await ServiceChecks.Batch(cancel,(index,item)=>{if(!IsDisposed)dashboard.SetResult(index,item);},quick?6:12,CheckEnabled,tgSnapshot),token,
                     (index,total,name)=>{if(IsDisposed)return;scanStep=index+" / "+total+" · "+Theme.StrategyName(name);dashboard.ScanSummary.Text=scanStep;dashboard.Progress(name);RefreshState();},
-                    candidate=>{if(IsDisposed)return;dashboard.Record(candidate);checkSummary.Text=candidate.Strategy.Replace(".bat","")+" · "+candidate.Passed+"/"+ServiceChecks.Targets.Length;Append("Автоподбор: "+candidate.Strategy+" · "+candidate.Passed+"/"+ServiceChecks.Targets.Length+(candidate.Error.Length>0?" · "+candidate.Error:""));for(int i=0;i<candidate.Results.Length;i++)Append("  "+ServiceChecks.Targets[i].Name+": "+candidate.Results[i].Detail+" · "+candidate.Results[i].Milliseconds+" мс");},quick,async cancel=>await ServiceChecks.Batch(cancel,(index,item)=>{if(!IsDisposed)dashboard.SetResult(index,item);}),strategyFeedback.Preferred(original));
+                    candidate=>{if(IsDisposed)return;dashboard.Record(candidate);checkSummary.Text=candidate.Strategy.Replace(".bat","")+" · "+candidate.Passed+"/"+candidate.Total;Append("Автоподбор: "+candidate.Strategy+" · "+candidate.Passed+"/"+candidate.Total+(candidate.Error.Length>0?" · "+candidate.Error:""));for(int i=0;i<candidate.Results.Length;i++)Append("  "+ServiceChecks.Targets[i].Name+": "+candidate.Results[i].Detail+" · "+candidate.Results[i].Milliseconds+" мс");},quick,async cancel=>await ServiceChecks.Batch(cancel,(index,item)=>{if(!IsDisposed)dashboard.SetResult(index,item);},12,CheckEnabled,tgSnapshot),strategyFeedback.Preferred(original));
                 if(result.Winner!=null) {
                     store.Settings.Strategy=result.Winner.Strategy;store.Save();activeStrategy=result.Winner.Strategy;chosen=true;
                     loading=true;categories.SelectedIndex=0;profiles.Items.Clear();profiles.Items.AddRange(names);profiles.SelectedItem=activeStrategy;loading=false;
                     for(int i=0;i<result.Winner.Results.Length;i++)dashboard.SetResult(i,result.Winner.Results[i]);
-                    checkSummary.Text="Сетевые пробы пройдены · проверьте Discord";
+                    checkSummary.Text="Сетевые пробы пройдены · проверьте выбранные сервисы";
                     dashboard.ScanSummary.Text="Выбран для проверки: "+Theme.StrategyName(activeStrategy);
                 }else {
                     bool dnsFailure=result.Candidates.Any(x=>x.Results.Any(y=>y.Failure=="dns"));
@@ -295,11 +327,11 @@ namespace ZapretDesktop {
         async Task RunChecksCore() {
             testing=true;checkCancellation=new CancellationTokenSource();var localCancellation=checkCancellation;var token=localCancellation.Token;
             int epoch=++checkEpoch;
-            var engineState=runner.Running?activeStrategy.Replace(".bat",""):(runner.Conflict?"внешний winws":"обход выключен");
+            var engineState=runner.Running?activeStrategy.Replace(".bat",""):(runner.TelegramRunning?"Telegram":runner.Conflict?"внешний winws":"сервисы выключены");
             dashboard.ClearResults("Проверяем: "+engineState+"…");RefreshState();
             try {
-                var results=await ServiceChecks.Batch(token,(index,item)=>{if(IsDisposed || epoch!=checkEpoch)return;dashboard.SetResult(index,item);Append(ServiceChecks.Targets[index].Name+": "+item.Detail+" · "+item.Milliseconds+" мс");});
-                if(!IsDisposed && epoch==checkEpoch){checkSummary.Text="Сетевых проб: "+results.Count(x=>x.State==1)+" из "+ServiceChecks.Targets.Length+(!runner.Running && !runner.Conflict?" · обход выключен":results.All(x=>x.State==1)?" · проверьте Discord":"");if(results.Any(x=>x.Failure=="dns"))dashboard.ScanSummary.Text="Есть ошибка DNS Windows.\nНажмите «Диагностика DNS».";else if(results.Any(x=>x.State==1 && x.DnsRoute=="doh"))dashboard.ScanSummary.Text="YouTube доступен через DoH.\nВ браузере включите безопасный DNS.";}
+                var results=await ServiceChecks.Batch(token,(index,item)=>{if(IsDisposed || epoch!=checkEpoch)return;dashboard.SetResult(index,item);Append(ServiceChecks.Targets[index].Name+": "+item.Detail+" · "+item.Milliseconds+" мс");},12,CheckEnabled);
+                if(!IsDisposed && epoch==checkEpoch){checkSummary.Text="Сетевых проб: "+results.Count(x=>!x.Informational && x.State==1)+" из "+results.Count(x=>!x.Informational && x.State!=3)+(runner.TelegramRunning?" · Telegram: "+(results.Any(x=>x.Informational && x.State==2)?"частично":results.Any(x=>x.Informational && x.State==1)?"доступен":"нет ответа"):!runner.Running && !runner.Conflict?" · обход выключен":results.All(x=>x.State==1 || x.State==3)?" · проверьте выбранные сервисы":"");if(results.Any(x=>x.Failure=="dns"))dashboard.ScanSummary.Text="Есть ошибка DNS Windows.\nНажмите «Диагностика DNS».";else if(results.Any(x=>x.State==1 && x.DnsRoute=="doh"))dashboard.ScanSummary.Text="YouTube доступен через DoH.\nВ браузере включите безопасный DNS.";}
             }catch(OperationCanceledException){}catch(Exception ex){if(!IsDisposed)Error(ex);}
             finally{testing=false;localCancellation.Dispose();if(checkCancellation==localCancellation)checkCancellation=null;if(!IsDisposed)RefreshState();}
         }
@@ -358,6 +390,10 @@ namespace ZapretDesktop {
             if (IsDisposed) return;
             bool on = runner.Running, external = !on && runner.Conflict;
             startWindows.Enabled=!busy && !starting && !scanning && !testing && !dnsBusy && !appUpdates.Working && !external && !domainEditor.Dirty;
+            discord.Enabled=startWindows.Enabled;telegram.Enabled=!busy && !starting && !scanning && !testing && !dnsBusy && !appUpdates.Working; externalBypass.Enabled=!busy && !starting && !scanning && !testing; externalBypass.Visible=external;bool oldLoading=loading;loading=true;externalBypass.Checked=external;loading=oldLoading;
+            if(!starting){bool wasLoading=loading;loading=true;telegram.Checked=runner.TelegramRunning;discord.Checked=on;loading=wasLoading;}
+            telegramStatus.Text=starting?"Применяем настройки…":runner.TelegramRunning?"Telegram работает отдельно\nЗвонки не поддерживаются":"Telegram не требует\nнастройки прокси";
+            if(baseTray!=null){baseTray.Checked=on;baseTray.Enabled=discord.Enabled;telegramTray.Checked=runner.TelegramRunning;telegramTray.Enabled=telegram.Enabled;}
             if(!startupChanging){bool previousLoading=loading;loading=true;startWindows.Checked=runner.StartupEnabled;loading=previousLoading;}
             startupStatus.Text=startupChanging?(startWindows.Checked?"Включаем… Подтвердите запрос Windows, если он появится.":"Выключаем… Подтвердите запрос Windows, если он появится."):
                 startupMessage.Length>0?startupMessage:startupReadError.Length>0?startupReadError:runner.StartupEnabled?(on?"Автозапуск включён · обход работает":"Автозапуск включён · обход запустится при старте Windows"):"Автозапуск выключен";
@@ -365,9 +401,8 @@ namespace ZapretDesktop {
             if(runner.StartupEnabled && on && !starting && !scanning)activeStrategy=runner.StartupStrategy;
             if(previouslyOn && !on && !scanning && !starting && !exiting) { InvalidateChecks("Ядро остановлено · проверка требуется заново"); if(checkCancellation!=null)checkCancellation.Cancel(); }
             previouslyOn=on;
-            state.Text = scanning ? "Подбираем стратегию" : on ? "Обход включён" : (external ? "Другой обход запущен" : "Обход выключен"); state.ForeColor=on?Theme.Success:external?Theme.Warning:Theme.Text;
-            subtitle.Text = scanning ? (scanStep.Length>0?scanStep:"Проверяем сетевые пробы…") : on ? Theme.StrategyName(activeStrategy) : (external ? "Закройте другой обход, чтобы управлять подключением здесь" : "Выберите вариант или нажмите «Подобрать автоматически»");
-            connect.Text = scanning ? "Остановить подбор" : starting ? "Запуск…" : (on ? "Выключить" : (external ? "Внешний winws" : "Включить")); connect.Enabled = !busy && !external && !starting;
+            state.Text = scanning ? "Подбираем стратегию" : on ? (runner.TelegramRunning?"Оба обхода включены":"Discord и YouTube включены") : runner.TelegramRunning?"Telegram включён":external?"Другой обход запущен":"Сервисы выключены"; state.ForeColor=on || runner.TelegramRunning?Theme.Success:external?Theme.Warning:Theme.Text;
+            subtitle.Text = scanning ? (scanStep.Length>0?scanStep:"Проверяем сетевые пробы…") : on ? Theme.StrategyName(activeStrategy) : runner.TelegramRunning?"Основная стратегия выключена · Telegram работает отдельно":external?"Выключите тумблер «Другой обход», чтобы включить Discord и YouTube":"Включите нужный тумблер";
             profiles.Enabled = categories.Enabled = !busy && !starting && !scanning;
             games.Enabled = tcp.Enabled = udp.Enabled = saveGameButton.Enabled = !on && !external && !busy && !starting && !scanning; domainEditor.SetAllowed(!external && !busy && !starting && !scanning,on);
             dashboard.ScanMode.Enabled = !busy && !starting && !scanning;
@@ -382,7 +417,7 @@ namespace ZapretDesktop {
             appUpdateCard.Render(appUpdates,appUpdates.Release!=null && domainEditor.Dirty && !appUpdates.Working?"Сохраните изменения в «Дополнительно», чтобы обновиться.":null);
             updateNotice.Render(appUpdates.Release==null?null:appUpdates.Release.Version,release==null?null:release.Version,appUpdateCard.Action.Enabled,install.Enabled,on || external);
             autoShell.Enabled = !appUpdates.Working && !busy && !store.Settings.AutoInstallShell;autoInstallShell.Enabled=!appUpdates.Working && !busy;coreManual.Visible=coreManual.Tag!=null;
-            tray.Text = "ByPass — " + (on ? "включён" : "выключен");
+            tray.Text = "ByPass — " + (on && runner.TelegramRunning?"оба обхода":on?"Discord и YouTube":runner.TelegramRunning?"Telegram":"выключен");
         }
         void AppUpdateChanged() {
             if(IsDisposed || Disposing)return;

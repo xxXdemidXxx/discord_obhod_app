@@ -98,7 +98,7 @@ namespace ZapretDesktop {
                 string installation=Path.GetDirectoryName(HostWire.Image(parent));Trust.NoLinks(installation);
                 string snapshot=Path.Combine(HostWire.ProtectedRoot,"runtime-"+Guid.NewGuid().ToString("N"));HostWire.ProtectDirectory(snapshot);
                 var snapshots=new List<string>{snapshot};string preparedVersion=null;
-                bool done=false;
+                bool done=false;TelegramRedirector telegram=null;
                 runner.Log+=line=>{try{HostWire.Write(pipe,new {type="log",text=line.Length>8192?line.Substring(0,8192):line});}catch{}};
                 using(var monitor=new Timer(_=>{try{if(gui.HasExited)pipe.Dispose();}catch{}},null,500,500)) {
                     try {
@@ -120,35 +120,58 @@ namespace ZapretDesktop {
                                         // Read with the caller's token, so the administrator cannot be used to read privileged files.
                                         HostWire.AsCaller(parent,()=>{inputs=ReadInputs(source);});
                                         RememberApproval(inputs);
+                                        if(preparedVersion!=null && preparedVersion!=version){snapshot=Path.Combine(HostWire.ProtectedRoot,"runtime-"+Guid.NewGuid().ToString("N"));HostWire.ProtectDirectory(snapshot);snapshots.Add(snapshot);preparedVersion=null;}
+                                        WriteSnapshot(snapshot,inputs,preparedVersion!=null);preparedVersion=version;
+                                        foreach(string repaired in RestoreDriverFiles(HostWire.ProtectedRoot,inputs,RegisteredDriverPaths()))HostWire.Write(pipe,new{type="log",text="Восстановлен проверенный драйвер ByPass: "+repaired});
+                                        DriverServiceRecovery.Repair(line=>HostWire.Write(pipe,new{type="log",text=line}));
                                         var startup=StartupService.Read(installation);
                                         if(action=="startup-enable" || action=="startup-sync" || startup.Owned) {
                                             if(action=="startup-sync" && !startup.Owned)throw new InvalidOperationException("Автозапуск не установлен.");
                                             StartupService.Configure(installation,version,strategy,inputs,action!="startup-sync" || startup.Running,line=>HostWire.Write(pipe,new{type="log",text=line}));
                                             preparing=false;break;
                                         }
-                                        if(preparedVersion!=null && preparedVersion!=version){snapshot=Path.Combine(HostWire.ProtectedRoot,"runtime-"+Guid.NewGuid().ToString("N"));HostWire.ProtectDirectory(snapshot);snapshots.Add(snapshot);preparedVersion=null;}
-                                        WriteSnapshot(snapshot,inputs,preparedVersion!=null);preparedVersion=version;
                                         var driverPaths=RegisteredDriverPaths();
                                         foreach(string driverPath in driverPaths)HostWire.Write(pipe,new{type="log",text="WinDivert: зарегистрированный путь "+driverPath+" · файл "+(File.Exists(NormalizeDriverPath(driverPath))?"есть":"отсутствует")});
                                         foreach(string repaired in RestoreDriverFiles(HostWire.ProtectedRoot,inputs,driverPaths))
                                             HostWire.Write(pipe,new{type="log",text="Восстановлен проверенный драйвер ByPass: "+repaired});
                                         DriverServiceRecovery.Repair(line=>HostWire.Write(pipe,new{type="log",text=line}));
-                                        preparing=false;runner.Start(snapshot,strategy);break;
+                                        runner.Start(snapshot,strategy);preparing=false;break;
+                                    case "telegram-start":
+                                        preparing=true;
+                                        if(telegram!=null && telegram.Running)break;
+                                        if(telegram!=null){telegram.Dispose();telegram=null;}
+                                        string tgVersion=(string)command["engine"];
+                                        if(!System.Text.RegularExpressions.Regex.IsMatch(tgVersion,@"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$") || tgVersion.Contains(".."))throw new InvalidDataException("Некорректная версия.");
+                                        string tgSource=Path.Combine(installation,"data","engines",tgVersion);Dictionary<string,byte[]> tgInputs=null;
+                                        HostWire.AsCaller(parent,()=>{tgInputs=ReadInputs(tgSource);});RememberApproval(tgInputs);
+                                        string tgSnapshot=Path.Combine(HostWire.ProtectedRoot,"runtime-"+Guid.NewGuid().ToString("N"));HostWire.ProtectDirectory(tgSnapshot);snapshots.Add(tgSnapshot);WriteSnapshot(tgSnapshot,tgInputs,false);
+                                        foreach(string repaired in RestoreDriverFiles(HostWire.ProtectedRoot,tgInputs,RegisteredDriverPaths()))HostWire.Write(pipe,new{type="log",text="Восстановлен проверенный драйвер ByPass: "+repaired});
+                                        DriverServiceRecovery.Repair(line=>HostWire.Write(pipe,new{type="log",text=line}));
+                                        telegram=StartTelegram(tgSnapshot,line=>HostWire.Write(pipe,new{type="log",text=line}));preparing=false;break;
+                                    case "telegram-stop":if(telegram!=null){telegram.Dispose();telegram=null;}break;
                                     case "startup-disable":runner.Stop();StartupService.Remove(installation);break;
+                                    case "stop-external":runner.Stop();ExternalBypass.Stop(line=>HostWire.Write(pipe,new{type="log",text=line}));break;
                                     case "stop":runner.Stop();if(StartupService.Read(installation).Owned)StartupService.Stop(installation);break;
                                     case "status":break;
-                                    case "shutdown":runner.Stop();done=true;break;
+                                    case "shutdown":if(telegram!=null){telegram.Dispose();telegram=null;}runner.Stop();done=true;break;
                                     default:throw new InvalidDataException("Неизвестная команда.");
                                 }
                                 var serviceState=StartupService.Read(installation);
-                                HostWire.Write(pipe,new{type="reply",running=serviceState.Owned?serviceState.Running:runner.Running,error=""});
+                                HostWire.Write(pipe,new{type="reply",running=serviceState.Owned?serviceState.Running:runner.Running,telegram_running=telegram!=null && telegram.Running,error=""});
                             }catch(Exception ex){
+                                if(action=="start")runner.Stop();
                                 var serviceState=StartupService.Read(installation);
-                                        HostWire.Write(pipe,new{type="reply",running=serviceState.Owned?serviceState.Running:runner.Running,error=ex.Message,error_kind=ex is EngineDriverException?"driver":preparing?"setup":"strategy"});}
+                                        HostWire.Write(pipe,new{type="reply",running=serviceState.Owned?serviceState.Running:runner.Running,telegram_running=telegram!=null && telegram.Running,error=ex.Message,error_kind=ex is EngineDriverException?"driver":preparing?"setup":"strategy"});}
                         }
-                    }finally{runner.Stop();foreach(string folder in snapshots)try{CleanupSnapshot(folder,RegisteredDriverPaths());}catch{}}
+                    }finally{if(telegram!=null)telegram.Dispose();runner.Stop();foreach(string folder in snapshots)try{CleanupSnapshot(folder,RegisteredDriverPaths());}catch{}}
                 }
             }
+        }
+        static TelegramRedirector StartTelegram(string snapshot,Action<string> log){
+            if(!TelegramFilter.Enabled(snapshot))return null;
+            // Route health is diagnostic, not a prerequisite for the whole
+            // engine. The bridge probes in the background after capture starts.
+            return new TelegramRedirector(snapshot,log);
         }
         // WinDivert reuses an existing driver's registered ImagePath. Keep that
         // file alive, and repair only a missing, trusted driver in our own runtime.
