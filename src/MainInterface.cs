@@ -98,7 +98,7 @@ namespace ZapretDesktop {
             if(busy || scanning || starting || runner.Conflict)return;
             try{DomainLists.Normalize(text,kind);}catch(Exception ex){domainEditor.SetError(ex.Message);return;}
             bool reconnect=runner.Running,failed=false;starting=true;RefreshState();
-            try{InvalidateChecks("Список сайтов изменён · проверяем заново");await StopChecks();if(reconnect)runner.Stop();DomainLists.Write(store.Current,kind,text);domainEditor.Saved();if(!reconnect)runner.SyncStartup(store.Current,store.Settings.Strategy);Append("Сохранён пользовательский список сайтов.");if(reconnect){await StartEngine(activeStrategy,System.Threading.CancellationToken.None);starting=false;await RunChecks();}}
+            try{InvalidateChecks("Список сайтов изменён · проверяем заново");await StopChecks();if(reconnect)await System.Threading.Tasks.Task.Run(()=>runner.Stop());DomainLists.Write(store.Current,kind,text);domainEditor.Saved();if(!reconnect)await System.Threading.Tasks.Task.Run(()=>runner.SyncStartup(store.Current,store.Settings.Strategy));Append("Сохранён пользовательский список сайтов.");if(reconnect){await StartEngine(activeStrategy,System.Threading.CancellationToken.None);starting=false;await RunChecks();}}
             catch(Exception ex){failed=true;domainEditor.SetError(ex.Message);}
             finally{starting=false;if(!IsDisposed)RefreshState();}
             if(failed && reconnect && !runner.Running && !IsDisposed) {starting=true;try{await StartEngine(activeStrategy,System.Threading.CancellationToken.None);}catch(Exception restart){Append(restart.Message);}finally{starting=false;RefreshState();}}

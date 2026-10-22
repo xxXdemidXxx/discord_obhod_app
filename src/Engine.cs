@@ -94,7 +94,9 @@ namespace ZapretDesktop {
             }
             result.Append('\\', slashes * 2); return result.Append('"').ToString();
         }
-        public static string Arguments(string engine, string strategy) {
+        public static string Arguments(string engine, string strategy) {return Arguments(engine,strategy,true);}
+        // Only used to authenticate startup commands written before Telegram support.
+        internal static string Arguments(string engine,string strategy,bool telegramPassthrough) {
             if (Path.GetFileName(strategy) != strategy || !strategy.StartsWith("general", StringComparison.OrdinalIgnoreCase) || !strategy.EndsWith(".bat", StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException("Недопустимое имя стратегии.");
             var text = File.ReadAllText(Path.Combine(engine, strategy), Encoding.UTF8);
@@ -119,7 +121,7 @@ namespace ZapretDesktop {
             if (!DiscordFilter.Enabled(engine)) DiscordFilter.Apply(tokens);
             // The base strategy always leaves MTProto/WSS untouched. Telegram
             // can then start/stop without restarting or rewriting this process.
-            TelegramFilter.Apply(tokens);
+            if(telegramPassthrough)TelegramFilter.Apply(tokens);
             return String.Join(" ", tokens.Select(Quote));
         }
         public static void GamePorts(string engine, out string tcp, out string udp) {

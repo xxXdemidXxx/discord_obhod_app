@@ -45,7 +45,8 @@ namespace ZapretDesktop {
         ToolStripMenuItem baseTray,telegramTray;
         DarkSelect profiles, categories, games; CheckBox autoCheck; TextBox tcp, udp, log;
         Label[] checkStatuses, checkTimes; Label checkSummary; Button runChecks;
-        DarkTabs tabs; bool starting;
+        DarkTabs tabs; bool starting,discordChanging,telegramChanging;
+        readonly SemaphoreSlim serviceChanges=new SemaphoreSlim(1,1);
         Dashboard dashboard; bool scanning, dnsBusy, pendingExit, stopAfterScan;
         YouTubeDnsSession youtubeDns; readonly CancellationTokenSource youtubeCancellation=new CancellationTokenSource();
         string activeStrategy,scanStep=""; int checkEpoch; Task manualCheckTask;
@@ -201,9 +202,15 @@ namespace ZapretDesktop {
         async Task SetService(bool discordMode) {
             if(loading)return;
             var option=discordMode?discord:telegram;bool enabled=option.Checked,previous=discordMode?runner.Running:runner.TelegramRunning,previousFlag=discordMode?DiscordFilter.Enabled(store.Current):TelegramFilter.Enabled(store.Current),reconnect=runner.Running;
-            if(busy || starting || scanning || testing || dnsBusy || appUpdates.Working || (discordMode && (runner.Conflict || domainEditor.Dirty))){loading=true;option.Checked=previous;loading=false;return;}
+            bool serviceChange=discordChanging || telegramChanging;
+            if((busy || starting) && !serviceChange || (discordMode?discordChanging:telegramChanging) || scanning || dnsBusy || appUpdates.Working || (discordMode && (runner.Conflict || domainEditor.Dirty))){loading=true;option.Checked=previous;loading=false;return;}
             string strategy=reconnect?activeStrategy:store.Settings.Strategy;
+            if(discordMode)discordChanging=true;else telegramChanging=true;
             problemNotice.Clear();starting=true;busy=true;RefreshState();
+            // Queue the privileged operations without blocking the message loop.
+            // The other switch can be requested while the first one starts.
+            await serviceChanges.WaitAsync();
+            try {
             Exception failure=null;
             try {
                 InvalidateChecks("Режим "+(discordMode?"Discord":"Telegram")+" изменён · проверка требуется заново");await StopChecks();
@@ -220,7 +227,11 @@ namespace ZapretDesktop {
                     else await Task.Run(()=>{TelegramFilter.Set(store.Current,previousFlag);runner.SetTelegram(store.Current,previous);});
                 }catch(Exception recovery){Error(recovery);}
             }
-            loading=true;telegram.Checked=runner.TelegramRunning;discord.Checked=runner.Running;loading=false;starting=false;busy=false;if(!IsDisposed)RefreshState();
+            }finally{
+            loading=true;option.Checked=discordMode?runner.Running:runner.TelegramRunning;loading=false;
+            if(discordMode)discordChanging=false;else telegramChanging=false;
+            starting=busy=discordChanging || telegramChanging;serviceChanges.Release();if(!IsDisposed)RefreshState();
+            }
         }
         async Task StopOtherBypass(){
             if(loading || busy || starting || scanning || testing || !runner.Conflict)return;
@@ -235,7 +246,7 @@ namespace ZapretDesktop {
             try {
                 if (profiles.SelectedItem == null) throw new InvalidOperationException("Нет стратегий. Проверьте папку data/engines.");
                 if(runner.Conflict)throw new InvalidOperationException("Сначала завершите внешний winws через его исходное приложение.");
-                InvalidateChecks("Применяем стратегию…");await StopChecks();runner.Stop();
+                InvalidateChecks("Применяем стратегию…");await StopChecks();await Task.Run(()=>runner.Stop());
                 store.Settings.Strategy = profiles.SelectedItem.ToString(); store.Save();
                 await StartEngine(store.Settings.Strategy,CancellationToken.None);
                 starting=false;RefreshState();await RunChecks();
@@ -244,7 +255,8 @@ namespace ZapretDesktop {
         async Task StartEngine(string strategy,CancellationToken token) {
             token.ThrowIfCancellationRequested();await Task.Delay(150,token);
             activeStrategy=strategy;await Task.Run(()=>{DiscordFilter.Set(store.Current,true);runner.Start(store.Current,strategy);});RefreshState();
-            try{await EngineRunner.WaitForReady(()=>runner.Running,()=>runner.Ready,token,10000,()=>runner.DriverFailure);}catch{runner.Stop();throw;}
+            Exception startFailure=null;try{await EngineRunner.WaitForReady(()=>runner.Running,()=>runner.Ready,token,10000,()=>runner.DriverFailure);}catch(Exception ex){startFailure=ex;}
+            if(startFailure!=null){await Task.Run(()=>runner.Stop());System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(startFailure).Throw();}
             if(!runner.Running)throw new IOException("Ядро завершилось после запуска. Подробности в журнале.");
         }
         bool CheckEnabled(ServiceTarget target){return target.Kind==ProbeKind.Telegram?runner.TelegramRunning:target.Name.StartsWith("GitHub") || runner.Running;}
@@ -260,12 +272,12 @@ namespace ZapretDesktop {
             bool wasRunning=runner.Running || restoreConnection;
             string original=runner.Running?activeStrategy:store.Settings.Strategy;
             bool quick=dashboard.ScanMode.SelectedIndex==0;
-            try{Strategy.ValidateEngine(store.Current);Trust.VerifyEngine(store.Current);}catch(Exception ex){Error(new EngineSetupException("Не удалось подготовить ядро.\n"+ex.Message,ex));return;}
             scanning=true;stopAfterScan=false;scanCancellation=new CancellationTokenSource();var token=scanCancellation.Token;
             var names=strategyFeedback.Order(store.Strategies(),original);dashboard.ResetHistory(names);RefreshState();bool chosen=false,setupFailed=false;
             Append("Порядок подбора: "+String.Join(" → ",names));
             try {
-                InvalidateChecks("Автоподбор начинается…");await StopChecks();runner.Stop();
+                await Task.Run(()=>{Strategy.ValidateEngine(store.Current);Trust.VerifyEngine(store.Current);});
+                InvalidateChecks("Автоподбор начинается…");await StopChecks();await Task.Run(()=>runner.Stop());
                 var tgSnapshot=runner.TelegramRunning?await ServiceChecks.TelegramProbe(token,12):null;
                 var result=await StrategySelector.Run(names,
                     async (name,cancel)=>{InvalidateChecks("Проверяется: "+name.Replace(".bat",""));await StartEngine(name,cancel);},
@@ -288,9 +300,9 @@ namespace ZapretDesktop {
             {
                 if(!chosen) {
                     try {
-                        runner.Stop();activeStrategy=original;store.Settings.Strategy=original;
+                        await Task.Run(()=>runner.Stop());activeStrategy=original;store.Settings.Strategy=original;
                         if(!IsDisposed && !pendingExit && !stopAfterScan && !setupFailed && wasRunning && !strategyFeedback.IsRejected(original)){await StartEngine(original,CancellationToken.None);InvalidateChecks("Возвращена "+original.Replace(".bat","")+" · проверка требуется заново");}
-                        else if(!IsDisposed){runner.SyncStartup(store.Current,original);InvalidateChecks("Обход выключен · выберите стратегию из таблицы");}
+                        else if(!IsDisposed){await Task.Run(()=>runner.SyncStartup(store.Current,original));InvalidateChecks("Обход выключен · выберите стратегию из таблицы");}
                     }catch(Exception ex){if(!IsDisposed)Append("Восстановление стратегии: "+ex.Message);}
                 }
                 scanning=false;scanCancellation.Dispose();scanCancellation=null;
@@ -308,7 +320,7 @@ namespace ZapretDesktop {
             if(!runner.Running || scanning || starting || testing || busy)return;
             strategyFeedback.Reject(activeStrategy);
             Append("Пользователь отклонил стратегию: "+activeStrategy+" · продолжаем подбор");
-            await StopChecks();runner.Stop();await AutoSelect(false);
+            await StopChecks();await Task.Run(()=>runner.Stop());await AutoSelect(false);
         }
         async Task CheckUpdates(bool quiet) {
             if (busy || scanning || checkingUpdates) return; checkingUpdates = true; RefreshState();
@@ -390,9 +402,10 @@ namespace ZapretDesktop {
             if (IsDisposed) return;
             bool on = runner.Running, external = !on && runner.Conflict;
             startWindows.Enabled=!busy && !starting && !scanning && !testing && !dnsBusy && !appUpdates.Working && !external && !domainEditor.Dirty;
-            discord.Enabled=startWindows.Enabled;telegram.Enabled=!busy && !starting && !scanning && !testing && !dnsBusy && !appUpdates.Working; externalBypass.Enabled=external && !busy && !starting && !scanning && !testing;externalStatus.Text=external?"Обнаружен другой winws · можно остановить":"Другой обход не обнаружен";externalStatus.ForeColor=external?Theme.Warning:Theme.Muted;
+            bool canSwitch=(!(busy || starting) || discordChanging || telegramChanging) && !scanning && !dnsBusy && !appUpdates.Working;
+            discord.Enabled=canSwitch && !discordChanging && !external && !domainEditor.Dirty;telegram.Enabled=canSwitch && !telegramChanging; externalBypass.Enabled=external && !busy && !starting && !scanning && !testing;externalStatus.Text=external?"Обнаружен другой winws · можно остановить":"Другой обход не обнаружен";externalStatus.ForeColor=external?Theme.Warning:Theme.Muted;
             if(!starting){bool wasLoading=loading;loading=true;telegram.Checked=runner.TelegramRunning;discord.Checked=on;loading=wasLoading;}
-            telegramStatus.Text=starting?"Применяем настройки…":runner.TelegramRunning?"Telegram работает отдельно\nЗвонки не поддерживаются":"Telegram не требует\nнастройки прокси";
+            telegramStatus.Text=telegramChanging?"Подключаем Telegram…":runner.TelegramRunning?"Telegram работает отдельно\nЗвонки не поддерживаются":"Telegram не требует\nнастройки прокси";
             if(baseTray!=null){baseTray.Checked=on;baseTray.Enabled=discord.Enabled;telegramTray.Checked=runner.TelegramRunning;telegramTray.Enabled=telegram.Enabled;}
             if(!startupChanging){bool previousLoading=loading;loading=true;startWindows.Checked=runner.StartupEnabled;loading=previousLoading;}
             startupStatus.Text=startupChanging?(startWindows.Checked?"Включаем… Подтвердите запрос Windows, если он появится.":"Выключаем… Подтвердите запрос Windows, если он появится."):

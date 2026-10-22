@@ -43,7 +43,8 @@ namespace ZapretDesktop {
                 using(var form=new MainForm(store,false)) {
                     form.Show();Application.DoEvents();var flags=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic;
                     var runner=(EngineRunner)typeof(MainForm).GetField("runner",flags).GetValue(form);runner.ConflictCheck=()=>false;
-                    int starts=0,tgStarts=0;bool deny=false;runner.TestStart=(e,s)=>{starts++;};runner.TestTelegram=(e,on)=>{if(on){if(deny){deny=false;throw new EngineStartException("Тестовый отказ Telegram");}tgStarts++;}};runner.TestStop=()=>{};runner.TestSync=(e,s)=>{};
+                    int starts=0,tgStarts=0;bool deny=false,denyBase=false,slowBase=false,slowTelegram=false;
+                    runner.TestStart=(e,s)=>{if(slowBase)Thread.Sleep(600);if(denyBase){denyBase=false;throw new EngineStartException("Тестовый отказ Discord");}starts++;};runner.TestTelegram=(e,on)=>{if(slowTelegram)Thread.Sleep(600);if(on){if(deny){deny=false;throw new EngineStartException("Тестовый отказ Telegram");}tgStarts++;}};runner.TestStop=()=>{};runner.TestSync=(e,s)=>{};
                     var toggle=AllControls(form).OfType<ToggleOption>().Single(x=>x.Name=="TelegramMessages");
                     Action wait=()=>{var watch=Stopwatch.StartNew();while((bool)typeof(MainForm).GetField("starting",flags).GetValue(form) && watch.ElapsedMilliseconds<10000){Application.DoEvents();Thread.Sleep(10);}Assert(!(bool)typeof(MainForm).GetField("starting",flags).GetValue(form),"Telegram change finishes asynchronously");};
                     foreach(var size in new[]{new Size(1100,830),new Size(940,690)}){form.ClientSize=new Size((int)(size.Width*Theme.SystemScale),(int)(size.Height*Theme.SystemScale));Application.DoEvents();Assert(toggle.Visible && toggle.Parent.ClientRectangle.Contains(toggle.Bounds),"Telegram switch fits window "+size);Capture(form,Path.Combine(root,"tests","window-telegram-off-"+size.Width+".png"));}
@@ -60,6 +61,27 @@ namespace ZapretDesktop {
                     SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());discord.Checked=true;wait();
                     int priorStarts=starts;SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());toggle.Checked=false;wait();Assert(runner.Running && !runner.TelegramRunning && starts==priorStarts,"Telegram off does not reconnect Discord/YouTube");
                     SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());toggle.Checked=true;wait();tgConnections=tgStarts;runner.Stop();runner.Start(store.Current,"general.bat");runner.Stop();Assert(runner.TelegramRunning && tgStarts==tgConnections,"Strategy candidate start/stop operations preserve Telegram session");
+                    toggle.Checked=false;wait();
+                    using(var heartbeat=new System.Windows.Forms.Timer{Interval=25}){
+                        int beats=0;heartbeat.Tick+=(s,e)=>beats++;heartbeat.Start();
+                        slowBase=true;SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());var click=Stopwatch.StartNew();discord.Checked=true;
+                        Assert(click.ElapsedMilliseconds<300 && toggle.Enabled,"Slow Discord start returns to UI and leaves Telegram switch usable");
+                        toggle.Checked=true;Capture(form,Path.Combine(root,"tests","window-services-pending.png"));wait();slowBase=false;
+                        Assert(beats>=3 && runner.Running && runner.TelegramRunning && discord.Checked && toggle.Checked,"Queued dual start keeps message loop responsive and enables both services");
+                        Capture(form,Path.Combine(root,"tests","window-services-both.png"));
+                        discord.Checked=false;wait();toggle.Checked=false;wait();
+                        slowTelegram=true;beats=0;SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());toggle.Checked=true;
+                        Assert(discord.Enabled,"Slow Telegram start leaves Discord switch usable");discord.Checked=true;wait();slowTelegram=false;
+                        Assert(beats>=3 && runner.Running && runner.TelegramRunning,"Reverse queued dual start also preserves both connections");
+                        deny=true;toggle.Checked=false;wait();toggle.Checked=true;wait();
+                        Assert(runner.Running && !runner.TelegramRunning && !toggle.Checked,"Failed Telegram start cannot stop already running Discord");
+                        toggle.Checked=true;wait();discord.Checked=false;wait();
+                        denyBase=true;discord.Checked=true;wait();Assert(!runner.Running && runner.TelegramRunning,"Failed Discord start cannot stop already running Telegram");
+                        int uiThread=Thread.CurrentThread.ManagedThreadId,blockedStops=0;beats=0;
+                        var selection=StrategySelector.Run(new[]{"fixture"},(name,token)=>Task.FromResult(0),()=>{if(Thread.CurrentThread.ManagedThreadId==uiThread)Interlocked.Increment(ref blockedStops);Thread.Sleep(120);},token=>Task.FromResult(new CheckResult[0]),CancellationToken.None,null,null);
+                        var selectionWatch=Stopwatch.StartNew();while(!selection.IsCompleted && selectionWatch.ElapsedMilliseconds<5000){Application.DoEvents();Thread.Sleep(10);}selection.GetAwaiter().GetResult();
+                        Assert(blockedStops==0 && beats>=3 && runner.TelegramRunning,"Strategy stop and cleanup run off UI thread and preserve Telegram");
+                    }
                     bool external=true;runner.ConflictCheck=()=>external;typeof(MainForm).GetMethod("RefreshState",flags).Invoke(form,null);Assert(toggle.Enabled && !discord.Enabled,"External bypass does not disable independent Telegram controls");
                     Assert(!AllControls(form).OfType<Button>().Any(x=>x.Text=="Включить" || x.Text=="Выключить"),"Global connect/disconnect button removed");
                     var other=AllControls(form).OfType<Button>().Single(x=>x.Name=="StopExternalBypass");var tabs=(DarkTabs)typeof(MainForm).GetField("tabs",flags).GetValue(form);tabs.SelectedIndex=1;Application.DoEvents();Assert(other.Enabled && other.Parent.Name=="ExternalBypassCard","External bypass action is a button in Settings");Capture(form,Path.Combine(root,"tests","window-external-bypass.png"));
@@ -283,6 +305,11 @@ namespace ZapretDesktop {
                 Assert(parts[0]==Path.Combine(snapshot,"bin","winws.exe") && parts.Skip(1).All(x=>x.StartsWith("--")),"Service command quotes executable and contains parsed upstream arguments");
                 var state=new StartupState{Snapshot=snapshot,Image=image,Strategy="general.bat"};
                 StartupService.ValidateRecord(state,folder,image);Assert(true,"Service record accepts only trusted protected snapshot and exact command");
+                string legacy="\""+Path.Combine(snapshot,"bin","winws.exe")+"\" "+Strategy.Arguments(snapshot,"general.bat",false);
+                state.Image=legacy;StartupService.ValidateRecord(state,folder,legacy);
+                Assert(image!=legacy,"Pre-Telegram startup command accepted for migration without weakening current command format");
+                state.Image=legacy+" --evil";Reject(()=>StartupService.ValidateRecord(state,folder,state.Image),"Legacy migration rejects extra arbitrary arguments even when record and registry agree");
+                state.Image=image+" --evil";Reject(()=>StartupService.ValidateRecord(state,folder,state.Image),"Current startup command rejects extra arbitrary arguments");state.Image=image;
                 Reject(()=>StartupService.ValidateRecord(state,Path.Combine(folder,"other"),image),"Service snapshot cannot escape protected root");
                 Reject(()=>StartupService.ValidateRecord(state,folder,image+" --evil"),"Changed service binary path cannot be adopted");
                 state.Strategy="../general.bat";Reject(()=>StartupService.ValidateRecord(state,folder,image),"Service strategy path traversal rejected");state.Strategy="general.bat";

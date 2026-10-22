@@ -33,7 +33,11 @@ namespace ZapretDesktop {
                 !System.Text.RegularExpressions.Regex.IsMatch(Path.GetFileName(state.Snapshot),@"^startup-[a-f0-9]{32}$") || state.Image!=image)
                 throw new InvalidDataException("Служба ByPass принадлежит другой установке или её параметры изменены.");
             Trust.NoLinks(state.Snapshot);Trust.VerifyEngine(state.Snapshot);
-            if(Command(state.Snapshot,state.Strategy)!=image)throw new InvalidDataException("Параметры службы ByPass изменены.");
+            string current=Command(state.Snapshot,state.Strategy);
+            string legacy="\""+Path.Combine(state.Snapshot,"bin","winws.exe")+"\" "+Strategy.Arguments(state.Snapshot,state.Strategy,false);
+            // An upgrade must accept the exact, trusted command of older shells.
+            // Configure then rewrites it with the current Telegram passthrough.
+            if(current!=image && legacy!=image)throw new InvalidDataException("Параметры службы ByPass изменены.");
         }
         internal static StartupState Read(string installation) {
 #if TESTING
