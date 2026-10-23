@@ -26,7 +26,7 @@ namespace ZapretDesktop {
         public int State; // 0: unavailable; 1: probe passed; 2: unexpected server response
         public string Detail; public long Milliseconds;
         public string Failure = "";
-        public bool Informational;public int AvailableEndpoints,TotalEndpoints;
+        public bool Informational;public int AvailableEndpoints,TotalEndpoints,MediaAvailableEndpoints,MediaTotalEndpoints;
         public string DnsRoute = "windows", SystemDnsFailure = "";
     }
     public static class ServiceChecks {
@@ -55,11 +55,13 @@ namespace ZapretDesktop {
                 cancel=>Run(target,cancel,timeoutSeconds,DirectHandler(),CheckGateway),
                 cancel=>RunYouTubeDoH(target,cancel,timeoutSeconds));
         }
-        internal static async Task<CheckResult> TelegramProbe(CancellationToken token,int timeoutSeconds){
+        internal static async Task<CheckResult> TelegramProbe(CancellationToken token,int timeoutSeconds,Func<int,bool,CancellationToken,Task<string>> probe=null){
             var watch=Stopwatch.StartNew();using(var deadline=CancellationTokenSource.CreateLinkedTokenSource(token)){
                 deadline.CancelAfter(timeoutSeconds*1000);
-                var results=await Task.WhenAll(Enumerable.Range(1,5).Select(async dc=>{try{return new CheckResult{State=1,Detail=await TelegramWire.Bounded(TelegramWire.ProbeTcp(dc,deadline.Token),deadline.Token).ConfigureAwait(false)};}catch(Exception ex){if(!(ex is SocketException) && !(ex is IOException) && !(ex is OperationCanceledException) && !(ex is ObjectDisposedException))throw;return new CheckResult{State=0,Detail="DC"+dc+": "+(deadline.IsCancellationRequested?(token.IsCancellationRequested?"отменено":"тайм-аут"):ex.Message)};}})).ConfigureAwait(false);
-                int passed=results.Count(x=>x.State==1);return new CheckResult{State=passed==5?1:passed>0?2:0,Informational=true,AvailableEndpoints=passed,TotalEndpoints=5,Failure=deadline.IsCancellationRequested?"timeout":passed==5?"":"mtproto",Milliseconds=watch.ElapsedMilliseconds,Detail="Telegram: доступны "+passed+" из 5 дата-центров. "+(passed>0 && passed<5?"Сообщения могут работать через доступные DC; часть подключений и вложений может быть недоступна. ":"")+"Проверка транспорта не подтверждает отправку сообщений. | "+String.Join(" | ",results.Select(x=>x.Detail))};
+                var ids=new[]{1,2,3,4,5,2,4,203};
+                var results=await Task.WhenAll(ids.Select(async (dc,index)=>{bool media=index>=5;try{return new CheckResult{State=1,Detail=(media?"Файлы ":"")+await TelegramWire.Bounded(probe==null?TelegramWire.ProbeTcp(dc,deadline.Token,media):probe(dc,media,deadline.Token),deadline.Token).ConfigureAwait(false)};}catch(Exception ex){if(!(ex is SocketException) && !(ex is IOException) && !(ex is OperationCanceledException) && !(ex is ObjectDisposedException))throw;return new CheckResult{State=0,Detail=(media?"Файлы ":"")+"DC"+dc+": "+(deadline.IsCancellationRequested?(token.IsCancellationRequested?"отменено":"тайм-аут"):ex.Message)};}})).ConfigureAwait(false);
+                int passed=results.Take(5).Count(x=>x.State==1),files=results.Skip(5).Count(x=>x.State==1);bool all=passed==5 && files==3;
+                return new CheckResult{State=all?1:passed+files>0?2:0,Informational=true,AvailableEndpoints=passed,TotalEndpoints=5,MediaAvailableEndpoints=files,MediaTotalEndpoints=3,Failure=all?"":deadline.IsCancellationRequested?"timeout":"mtproto",Milliseconds=watch.ElapsedMilliseconds,Detail="Telegram: основные DC "+passed+"/5; каналы файлов DC2/DC4/CDN203 "+files+"/3. Это проверка протокола, а не загрузка файла из аккаунта. | "+String.Join(" | ",results.Select(x=>x.Detail))};
             }
         }
         internal static async Task<CheckResult> RunWithDnsFallback(ServiceTarget target,CancellationToken token,int timeoutSeconds,Func<CancellationToken,Task<CheckResult>> direct,Func<CancellationToken,Task<CheckResult>> doh){

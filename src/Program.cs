@@ -45,7 +45,7 @@ namespace ZapretDesktop {
         ToolStripMenuItem baseTray,telegramTray;
         DarkSelect profiles, categories, games; CheckBox autoCheck; TextBox tcp, udp, log;
         Label[] checkStatuses, checkTimes; Label checkSummary; Button runChecks;
-        DarkTabs tabs; bool starting,discordChanging,telegramChanging;
+        DarkTabs tabs; bool starting,discordChanging,telegramChanging,relayChanging;
         readonly SemaphoreSlim serviceChanges=new SemaphoreSlim(1,1);
         Dashboard dashboard; bool scanning, dnsBusy, pendingExit, stopAfterScan;
         YouTubeDnsSession youtubeDns; readonly CancellationTokenSource youtubeCancellation=new CancellationTokenSource();
@@ -133,6 +133,7 @@ namespace ZapretDesktop {
                 autoInstallShell.Checked=store.Settings.AutoInstallShell;autoInstallCore.Checked=store.Settings.AutoInstallCore;
                 startWindows.Checked=runner.StartupEnabled;
                 telegram.Checked=runner.TelegramRunning;discord.Checked=runner.Running;
+                telegramRelay.Checked=TelegramRelay.Enabled(store.Current);
             } finally { loading = false; RefreshState(); }
         }
         async Task PollStartup(){
@@ -196,6 +197,16 @@ namespace ZapretDesktop {
                 } else File.WriteAllText(path, "mode=" + mode + "\r\ntcp=" + tcp.Text.Trim() + "\r\nudp=" + udp.Text.Trim() + "\r\n");
             }
             runner.SyncStartup(store.Current,store.Settings.Strategy);Append("Настройки GameFilter сохранены.");
+        }
+        async Task SetTelegramRelay(){
+            if(loading)return;bool enabled=telegramRelay.Checked,previous=TelegramRelay.Enabled(store.Current),wasRunning=runner.TelegramRunning;
+            if(busy || starting || scanning || dnsBusy || appUpdates.Working){loading=true;telegramRelay.Checked=previous;loading=false;return;}
+            relayChanging=true;busy=true;RefreshState();
+            Exception failure=null;
+            try{await StopChecks();await Task.Run(()=>{if(wasRunning)runner.SetTelegram(store.Current,false);TelegramRelay.Set(store.Current,enabled);if(wasRunning)runner.SetTelegram(store.Current,true);});InvalidateChecks("Маршрут медиа Telegram изменён · проверьте загрузку файла");Append(enabled?"Telegram: резерв Flowseal/Cloudflare разрешён.":"Telegram: внешний резерв выключен.");}
+            catch(Exception ex){failure=ex;Error(ex);}
+            if(failure!=null){try{await Task.Run(()=>{TelegramRelay.Set(store.Current,previous);if(wasRunning)runner.SetTelegram(store.Current,true);});}catch(Exception recovery){Error(recovery);}}
+            relayChanging=false;busy=false;if(!IsDisposed)RefreshState();
         }
         async Task SetTelegram(){await SetService(false);}
         async Task SetDiscord(){await SetService(true);}
@@ -401,6 +412,8 @@ namespace ZapretDesktop {
         void RefreshState() {
             if (IsDisposed) return;
             bool on = runner.Running, external = !on && runner.Conflict;
+            telegramRelay.Enabled=!busy && !starting && !scanning && !dnsBusy && !appUpdates.Working;
+            if(!relayChanging){bool wasLoading=loading;loading=true;telegramRelay.Checked=TelegramRelay.Enabled(store.Current);loading=wasLoading;}
             startWindows.Enabled=!busy && !starting && !scanning && !testing && !dnsBusy && !appUpdates.Working && !external && !domainEditor.Dirty;
             bool canSwitch=(!(busy || starting) || discordChanging || telegramChanging) && !scanning && !dnsBusy && !appUpdates.Working;
             discord.Enabled=canSwitch && !discordChanging && !external && !domainEditor.Dirty;telegram.Enabled=canSwitch && !telegramChanging; externalBypass.Enabled=external && !busy && !starting && !scanning && !testing;externalStatus.Text=external?"Обнаружен другой winws · можно остановить":"Другой обход не обнаружен";externalStatus.ForeColor=external?Theme.Warning:Theme.Muted;

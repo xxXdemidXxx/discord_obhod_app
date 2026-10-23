@@ -10,7 +10,7 @@ namespace ZapretDesktop {
         float windowScale=Theme.SystemScale; int Px(int value){return (int)Math.Round(value*windowScale);}
         protected override void ScaleControl(SizeF factor,BoundsSpecified specified){windowScale*=factor.Width;base.ScaleControl(factor,specified);}
         DomainEditor domainEditor;Button saveGameButton;Label gameSaved;bool expandedPorts;
-        ToggleOption telegram,discord; Button externalBypass; Label telegramStatus,externalStatus;
+        ToggleOption telegram,discord,telegramRelay; Button externalBypass; Label telegramStatus,externalStatus;
         void BuildInterface() {
             ownerMark=Theme.Label("Проверяем подпись сборки…",8);ownerMark.Dock=DockStyle.Bottom;ownerMark.Height=Px(24);ownerMark.TextAlign=ContentAlignment.MiddleLeft;ownerMark.AutoEllipsis=true;
             Text="ByPass";ClientSize=new Size(Px(1100),Px(830));MinimumSize=new Size(Px(940),Px(690));FormBorderStyle=FormBorderStyle.None;ControlBox=false;ShowIcon=false;
@@ -18,7 +18,7 @@ namespace ZapretDesktop {
             // not intercept the native resize hit test.
             Padding=new Padding(Px(6));
             StartPosition=FormStartPosition.CenterScreen;Font=new Font("Segoe UI",10);BackColor=background;ForeColor=Theme.Text;AutoScaleMode=AutoScaleMode.None;Icon=AppIcon.Load();
-            var titlebar=new Panel{Dock=DockStyle.Top,Height=Px(36),BackColor=Theme.Input};var title=Theme.Label("ByPass",9,true);title.SetBounds(Px(18),Px(0),Px(320),Px(36));title.ForeColor=Theme.Muted;title.TextAlign=ContentAlignment.MiddleLeft;titlebar.Controls.Add(title);
+            var titlebar=new Panel{Dock=DockStyle.Top,Height=Px(36),BackColor=Theme.Input};var title=Theme.Label(Text,9,true);title.SetBounds(Px(18),Px(0),Px(320),Px(36));title.ForeColor=Theme.Muted;title.TextAlign=ContentAlignment.MiddleLeft;titlebar.Controls.Add(title);
             Button minimize=Theme.Button("−"),maximize=Theme.Button("□"),close=Theme.Button("×");minimize.Name="MinimizeWindow";maximize.Name="MaximizeWindow";close.Name="HideWindow";minimize.AccessibleName="Свернуть";maximize.AccessibleName="Развернуть или восстановить";close.AccessibleName="Скрыть в значок у часов";foreach(var b in new[]{minimize,maximize,close}){b.BackColor=Theme.Input;b.Size=new Size(Px(44),Px(30));titlebar.Controls.Add(b);}titlebar.Resize+=(s,e)=>{close.SetBounds(titlebar.Width-Px(48),Px(3),Px(44),Px(30));maximize.SetBounds(titlebar.Width-Px(94),Px(3),Px(44),Px(30));minimize.SetBounds(titlebar.Width-Px(140),Px(3),Px(44),Px(30));};minimize.Click+=(s,e)=>WindowState=FormWindowState.Minimized;maximize.Click+=(s,e)=>WindowState=WindowState==FormWindowState.Maximized?FormWindowState.Normal:FormWindowState.Maximized;close.Click+=(s,e)=>Hide();
             MouseEventHandler drag=(s,e)=>{if(e.Button==MouseButtons.Left){ReleaseCapture();SendMessage(Handle,0xA1,new IntPtr(2),IntPtr.Zero);}};titlebar.MouseDown+=drag;title.MouseDown+=drag;titlebar.DoubleClick+=(s,e)=>maximize.PerformClick();title.DoubleClick+=(s,e)=>maximize.PerformClick();
             tabs=new DarkTabs{Dock=DockStyle.Fill};Panel connection=Page("Подключение"),domains=Page("Дополнительно"),filters=Page("Настройки"),updates=Page("Обновления"),logs=Page("Журнал"),help=Page("Помощь");help.Controls.Add(ownerMark);tabs.AddPages(new[]{connection,filters,updates,logs,domains,help});Controls.Add(tabs);updateNotice=new UpdateNotice();updateNotice.ShellRequested+=async()=>await AppUpdateAction();updateNotice.CoreRequested+=async()=>await Install();Controls.Add(updateNotice);problemNotice=new ProblemNotice();problemNotice.Details.Click+=(s,e)=>tabs.SelectedIndex=3;Controls.Add(problemNotice);Controls.Add(titlebar);
@@ -48,7 +48,7 @@ namespace ZapretDesktop {
         void ShowAdvanced(bool gamesVisible){advancedGames=gamesVisible;sitePage.Visible=!gamesVisible;gamePage.Visible=gamesVisible;sitesSection.BackColor=gamesVisible?Theme.ButtonSurface:Theme.Accent;gamesSection.BackColor=gamesVisible?Theme.Accent:Theme.ButtonSurface;}
         void BuildFilters(Panel page){
             page.AutoScroll=true;
-            var layout=new TableLayoutPanel{Dock=DockStyle.Top,AutoSize=true,ColumnCount=1,RowCount=4,Margin=Padding.Empty};layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));
+            var layout=new TableLayoutPanel{Dock=DockStyle.Top,AutoSize=true,ColumnCount=1,RowCount=5,Margin=Padding.Empty};layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));
             var startupCard=new SurfacePanel{Name="StartupCard",Height=Px(214),Dock=DockStyle.Top,Margin=new Padding(0,0,0,Px(16))};
             var startupTitle=Theme.Label("Автозапуск",18,true);
             startWindows=new ToggleOption{Name="WindowsStartup",Text="Запускать при старте Windows"};
@@ -62,6 +62,10 @@ namespace ZapretDesktop {
             var externalHelp=Theme.Label("Останавливает обнаруженный winws и связанные службы.\nФайлы и настройки автозапуска остаются на месте.",9);externalHelp.ForeColor=Theme.Muted;
             externalBypass=Theme.Button("Отключить другой обход");externalBypass.Name="StopExternalBypass";externalBypass.Click+=async(s,e)=>await StopOtherBypass();externalCard.Controls.AddRange(new Control[]{externalTitle,externalStatus,externalHelp,externalBypass});
             externalCard.Resize+=(s,e)=>{int p=externalCard.Padding.Left,w=externalCard.Width-p*2;externalTitle.SetBounds(p,p,w,Px(32));externalStatus.SetBounds(p,p+Px(38),w,Px(24));externalHelp.SetBounds(p,p+Px(66),w,Px(42));externalBypass.SetBounds(p,p+Px(116),Math.Min(w,Px(300)),Px(40));};
+            var mediaCard=new SurfacePanel{Name="TelegramMediaCard",Dock=DockStyle.Top,Height=Px(190),Margin=new Padding(0,0,0,Px(16))};
+            var mediaTitle=Theme.Label("Медиа Telegram",18,true);telegramRelay=new ToggleOption{Name="TelegramRelay",Text="Резерв Flowseal / Cloudflare"};
+            var mediaHelp=Theme.Label("Помогает загружать фото, видео и файлы из заблокированных DC/CDN.\nЭто внешний маршрут: оператор видит IP и объём трафика, MTProto зашифрован.\nИзменение переподключает только Telegram. По умолчанию выключено.",9);mediaHelp.ForeColor=Theme.Muted;
+            mediaCard.Controls.AddRange(new Control[]{mediaTitle,telegramRelay,mediaHelp});mediaCard.Resize+=(s,e)=>{int p=mediaCard.Padding.Left,w=mediaCard.Width-p*2;mediaTitle.SetBounds(p,p,w,Px(32));telegramRelay.SetBounds(p,p+Px(42),w,Px(34));mediaHelp.SetBounds(p,p+Px(84),w,Px(66));};telegramRelay.CheckedChanged+=async(s,e)=>await SetTelegramRelay();
             var appearance=new SurfacePanel{Name="AppearanceCard",Dock=DockStyle.Top,Height=Px(238),Margin=Padding.Empty};
             var title=Theme.Label("Оформление",18,true);var hint=Theme.Label("Три тёмные темы. Выбор применяется сразу и сохраняется.",9);hint.ForeColor=Theme.Muted;
             var choices=System.Linq.Enumerable.ToArray(System.Linq.Enumerable.Select(Theme.Presets,p=>new ThemeChoice(p)));
@@ -69,7 +73,7 @@ namespace ZapretDesktop {
             foreach(var choice in choices)choice.Click+=(sender,e)=>Guard(()=>ApplyVisualTheme(choice.Palette.Id));
             appearance.Resize+=(sender,e)=>{int p=appearance.Padding.Left,w=appearance.Width-p*2,gap=Px(12),width=(w-gap*2)/3;title.SetBounds(p,p,w,Px(32));hint.SetBounds(p,p+Px(39),w,Px(28));for(int i=0;i<choices.Length;i++)choices[i].SetBounds(p+i*(width+gap),p+Px(82),width,Px(116));};
             var shortcut=Theme.Button("Создать ярлык");shortcut.Margin=new Padding(0,Px(16),0,0);shortcut.Size=new Size(Px(210),Px(40));shortcut.Click+=(sender,e)=>Guard(()=>{AppShortcut.Create();shortcut.Text="Ярлык создан";});
-            layout.Controls.Add(startupCard,0,0);layout.Controls.Add(externalCard,0,1);layout.Controls.Add(appearance,0,2);layout.Controls.Add(shortcut,0,3);page.Controls.Add(layout);
+            layout.Controls.Add(startupCard,0,0);layout.Controls.Add(externalCard,0,1);layout.Controls.Add(mediaCard,0,2);layout.Controls.Add(appearance,0,3);layout.Controls.Add(shortcut,0,4);page.Controls.Add(layout);
         }
         void ApplyVisualTheme(string id){
             var previous=Theme.Palette(Theme.Current);var next=Theme.Palette(id);string saved=store.Settings.VisualTheme;

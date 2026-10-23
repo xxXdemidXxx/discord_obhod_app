@@ -26,12 +26,12 @@ namespace ZapretDesktop {
         [DllImport("kernel32.dll")]static extern bool FreeLibrary(IntPtr library);
         readonly CancellationTokenSource cancel=new CancellationTokenSource();readonly List<TcpListener> listeners=new List<TcpListener>();
         readonly Dictionary<int,int> redirects=new Dictionary<int,int>();readonly ConcurrentDictionary<int,byte> upstream=new ConcurrentDictionary<int,byte>();
-        readonly ConcurrentDictionary<TcpClient,byte> clients=new ConcurrentDictionary<TcpClient,byte>();readonly Action<string> log;
-        IntPtr library,handle;Recv recv;Send send;Checksums checksums;Shutdown shutdown;Close close;Task loop;bool disposed;
+        readonly ConcurrentDictionary<TcpClient,byte> clients=new ConcurrentDictionary<TcpClient,byte>();readonly Action<string> log;readonly TelegramTelemetry telemetry;
+        IntPtr library,handle;Recv recv;Send send;Checksums checksums;Shutdown shutdown;Close close;Task loop;bool disposed;readonly bool relayAllowed;
         internal bool Running {get{return handle!=IntPtr.Zero && loop!=null && !loop.IsCompleted;}}
         T Function<T>(string name){IntPtr address=GetProcAddress(library,name);if(address==IntPtr.Zero)throw new Win32Exception(Marshal.GetLastWin32Error(),name);return (T)(object)Marshal.GetDelegateForFunctionPointer(address,typeof(T));}
         internal TelegramRedirector(string engine,Action<string> log){
-            this.log=log;
+            this.log=log;telemetry=new TelegramTelemetry(log);relayAllowed=TelegramRelay.Enabled(engine);
             try{
                 // Caller has already copied and independently verified this protected core.
                 Trust.VerifyEngine(engine);Trust.NoLinks(Path.Combine(engine,"bin","WinDivert.dll"));
@@ -47,7 +47,8 @@ namespace ZapretDesktop {
                 handle=open(filter,0,200,0);if(handle==new IntPtr(-1)){handle=IntPtr.Zero;throw new Win32Exception(Marshal.GetLastWin32Error(),"Telegram: WinDivert не начал перехват");}
                 loop=Task.Factory.StartNew(Capture,CancellationToken.None,TaskCreationOptions.LongRunning,TaskScheduler.Default);
                 if(log!=null)log("Telegram: прозрачный WSS-мост активен · TCP 80/443/5222 · без настройки клиента.");
-                var check=Task.Run(async()=>{try{using(var deadline=CancellationTokenSource.CreateLinkedTokenSource(cancel.Token)){deadline.CancelAfter(12000);await TelegramWire.Warm(deadline.Token,log).ConfigureAwait(false);}}catch(Exception ex){if(!cancel.IsCancellationRequested && log!=null)log("Telegram: фоновая проверка · "+ex.Message+" · основная стратегия продолжает работать.");}});
+                if(log!=null)log(relayAllowed?"Telegram: резерв Flowseal/Cloudflare включён для медиа и CDN; MTProto остаётся зашифрованным.":"Telegram: внешний резерв выключен; заблокированный CDN может быть недоступен.");
+                var check=Task.Run(async()=>{try{using(var deadline=CancellationTokenSource.CreateLinkedTokenSource(cancel.Token)){deadline.CancelAfter(12000);await TelegramWire.Warm(deadline.Token,telemetry.Event).ConfigureAwait(false);}}catch(Exception ex){if(!cancel.IsCancellationRequested)telemetry.Failure(ex);}});
             }catch{Dispose();throw;}
         }
         internal static string Filter(IEnumerable<int> ports){
@@ -64,22 +65,23 @@ namespace ZapretDesktop {
             }
         }
         async Task Handle(TcpClient client){
+            int dc=0;bool media=false,opened=false;
             try{
                 var endpoint=(IPEndPoint)client.Client.RemoteEndPoint;
                 if(!TelegramFilter.Contains(endpoint.Address))return;
                 client.NoDelay=true;using(var deadline=CancellationTokenSource.CreateLinkedTokenSource(cancel.Token))using(deadline.Token.Register(()=>client.Close())){
                     deadline.CancelAfter(10000);var stream=client.GetStream();byte[] header=new byte[64];await TelegramWire.Exact(stream,header,deadline.Token).ConfigureAwait(false);
-                    bool media=false;int dc=0;try{dc=TelegramWire.Dc(header,out media);}catch(InvalidDataException){}
+                    try{dc=TelegramWire.Dc(header,out media);}catch(InvalidDataException){media=false;}
+                    telemetry.Open(dc,media);opened=true;
                     deadline.CancelAfter(Timeout.Infinite);
-                    if(dc!=0)await TelegramWire.Relay(stream,header,dc,media,deadline.Token,log).ConfigureAwait(false);
+                    if(dc!=0 && (dc!=203 || relayAllowed))await TelegramWire.Relay(stream,header,dc,media,deadline.Token,telemetry.Event,telemetry,(id,files,token)=>TelegramWire.Connect(id,files,token,telemetry.Event,relayAllowed)).ConfigureAwait(false);
                     else await Passthrough(client,stream,header,endpoint.Address,deadline.Token).ConfigureAwait(false);
                 }
-            }catch(Exception ex){if(!cancel.IsCancellationRequested && log!=null)log("Telegram: канал закрыт · "+ex.GetBaseException().Message);}
-            finally{byte ignored;clients.TryRemove(client,out ignored);client.Close();}
+            }catch(Exception ex){if(!cancel.IsCancellationRequested)telemetry.Failure(ex);}
+            finally{if(opened)telemetry.Close(dc,media);byte ignored;clients.TryRemove(client,out ignored);client.Close();}
         }
         async Task Passthrough(TcpClient client,Stream stream,byte[] header,IPAddress target,CancellationToken token){
             if(target.IsIPv4MappedToIPv6)target=target.MapToIPv4();int destination=redirects[((IPEndPoint)client.Client.LocalEndPoint).Port];
-            if(log!=null)log("Telegram: прямой канал без MTProto-заголовка · "+target+":"+destination);
             using(var deadline=CancellationTokenSource.CreateLinkedTokenSource(token)){
                 deadline.CancelAfter(10000);using(var remote=await TelegramWire.Dial(target,destination,deadline.Token).ConfigureAwait(false))using(deadline.Token.Register(()=>remote.Dispose())){
                     deadline.CancelAfter(Timeout.Infinite);await remote.WriteAsync(header,0,header.Length,deadline.Token).ConfigureAwait(false);var up=stream.CopyToAsync(remote,65536,deadline.Token);var down=remote.CopyToAsync(stream,65536,deadline.Token);Task first=await Task.WhenAny(up,down).ConfigureAwait(false);Exception failure=first.IsFaulted?first.Exception.GetBaseException():null;deadline.Cancel();client.Close();remote.Dispose();try{await Task.WhenAll(up,down).ConfigureAwait(false);}catch(OperationCanceledException){}catch(IOException){}catch(ObjectDisposedException){}if(failure!=null)throw failure;
@@ -117,6 +119,7 @@ namespace ZapretDesktop {
             if(handle!=IntPtr.Zero){shutdown(handle,1);if(loop!=null)loop.Wait(3000);close(handle);handle=IntPtr.Zero;}
             // Do not unload while a native receive is outstanding.
             if(library!=IntPtr.Zero && (loop==null || loop.IsCompleted)){FreeLibrary(library);library=IntPtr.Zero;}
+            telemetry.Dispose();
             cancel.Dispose();
         }
     }

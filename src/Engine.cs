@@ -205,6 +205,11 @@ namespace ZapretDesktop {
         }
     }
 
+    public static class TelegramRelay {
+        public const string RelativePath="utils/telegram_relay.enabled";
+        public static bool Enabled(string engine){return File.Exists(Path.Combine(engine,RelativePath));}
+        public static void Set(string engine,bool enabled){string path=Path.Combine(engine,RelativePath);Trust.NoLinks(path);if(!enabled){if(File.Exists(path))File.Delete(path);}else{Directory.CreateDirectory(Path.GetDirectoryName(path));File.WriteAllText(path,"flowseal-relay-opt-in-v1\r\n",new UTF8Encoding(false));}}
+    }
     public static class DiscordFilter {
         public const string RelativePath="utils/discord_filter.disabled";
         public const string Domains="discord.com,discord.gg,discordapp.com,discordapp.net,discord.media,discordcdn.com,discord.gift,discordstatus.com";
