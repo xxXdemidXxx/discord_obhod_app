@@ -10,6 +10,7 @@ namespace ZapretDesktop {
             Exception cause=error;
             while(cause.InnerException!=null)cause=cause.InnerException;
             var windows=cause as Win32Exception;
+            if(error is EngineStopException)return error.Message;
             if(windows!=null && windows.NativeErrorCode==1223)
                 return "Запуск отменён в окне Windows.\nЧтобы включить обход, повторите запуск и подтвердите запрос Windows.";
             if(error is EngineDriverException)

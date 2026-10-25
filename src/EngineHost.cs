@@ -97,7 +97,7 @@ namespace ZapretDesktop {
                 if(!HostWire.GetNamedPipeServerProcessId(pipe.SafePipeHandle.DangerousGetHandle(),out server) || server!=parent)throw new InvalidDataException("Неизвестный клиент управления.");
                 string installation=Path.GetDirectoryName(HostWire.Image(parent));Trust.NoLinks(installation);
                 string snapshot=Path.Combine(HostWire.ProtectedRoot,"runtime-"+Guid.NewGuid().ToString("N"));HostWire.ProtectDirectory(snapshot);
-                var snapshots=new List<string>{snapshot};string preparedVersion=null;
+                var snapshots=new List<string>{snapshot};string preparedVersion=null,lastEngine=null;
                 bool done=false;TelegramRedirector telegram=null;
                 runner.Log+=line=>{try{HostWire.Write(pipe,new {type="log",text=line.Length>8192?line.Substring(0,8192):line});}catch{}};
                 using(var monitor=new Timer(_=>{try{if(gui.HasExited)pipe.Dispose();}catch{}},null,500,500)) {
@@ -121,7 +121,7 @@ namespace ZapretDesktop {
                                         HostWire.AsCaller(parent,()=>{inputs=ReadInputs(source);});
                                         RememberApproval(inputs);
                                         if(preparedVersion!=null && preparedVersion!=version){snapshot=Path.Combine(HostWire.ProtectedRoot,"runtime-"+Guid.NewGuid().ToString("N"));HostWire.ProtectDirectory(snapshot);snapshots.Add(snapshot);preparedVersion=null;}
-                                        WriteSnapshot(snapshot,inputs,preparedVersion!=null);preparedVersion=version;
+                                        WriteSnapshot(snapshot,inputs,preparedVersion!=null);preparedVersion=version;lastEngine=snapshot;
                                         foreach(string repaired in RestoreDriverFiles(HostWire.ProtectedRoot,inputs,RegisteredDriverPaths()))HostWire.Write(pipe,new{type="log",text="Восстановлен проверенный драйвер ByPass: "+repaired});
                                         DriverServiceRecovery.Repair(line=>HostWire.Write(pipe,new{type="log",text=line}));
                                         var startup=StartupService.Read(installation);
@@ -144,7 +144,7 @@ namespace ZapretDesktop {
                                         if(!System.Text.RegularExpressions.Regex.IsMatch(tgVersion,@"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$") || tgVersion.Contains(".."))throw new InvalidDataException("Некорректная версия.");
                                         string tgSource=Path.Combine(installation,"data","engines",tgVersion);Dictionary<string,byte[]> tgInputs=null;
                                         HostWire.AsCaller(parent,()=>{tgInputs=ReadInputs(tgSource);});RememberApproval(tgInputs);
-                                        string tgSnapshot=Path.Combine(HostWire.ProtectedRoot,"runtime-"+Guid.NewGuid().ToString("N"));HostWire.ProtectDirectory(tgSnapshot);snapshots.Add(tgSnapshot);WriteSnapshot(tgSnapshot,tgInputs,false);
+                                        string tgSnapshot=Path.Combine(HostWire.ProtectedRoot,"runtime-"+Guid.NewGuid().ToString("N"));HostWire.ProtectDirectory(tgSnapshot);snapshots.Add(tgSnapshot);WriteSnapshot(tgSnapshot,tgInputs,false);lastEngine=tgSnapshot;
                                         foreach(string repaired in RestoreDriverFiles(HostWire.ProtectedRoot,tgInputs,RegisteredDriverPaths()))HostWire.Write(pipe,new{type="log",text="Восстановлен проверенный драйвер ByPass: "+repaired});
                                         DriverServiceRecovery.Repair(line=>HostWire.Write(pipe,new{type="log",text=line}));
                                         telegram=StartTelegram(tgSnapshot,line=>HostWire.Write(pipe,new{type="log",text=line}));preparing=false;break;
@@ -153,15 +153,25 @@ namespace ZapretDesktop {
                                     case "stop-external":runner.Stop();ExternalBypass.Stop(line=>HostWire.Write(pipe,new{type="log",text=line}));break;
                                     case "stop":runner.Stop();if(StartupService.Read(installation).Owned)StartupService.Stop(installation);break;
                                     case "status":break;
-                                    case "shutdown":if(telegram!=null){telegram.Dispose();telegram=null;}runner.Stop();done=true;break;
+                                    case "release-idle":
+                                        var idleStartup=StartupService.Read(installation);
+                                        if(runner.Running || (telegram!=null && telegram.Running) || (idleStartup.Owned && idleStartup.Running))break;
+                                        done=true;
+                                        DriverShutdown.Unload(lastEngine??(idleStartup.Owned?idleStartup.Snapshot:null),line=>HostWire.Write(pipe,new{type="log",text=line}));
+                                        break;
+                                    case "shutdown":
+                                        if(telegram!=null){telegram.Dispose();telegram=null;}runner.Stop();done=true;
+                                        var exitStartup=StartupService.Read(installation);
+                                        if(!exitStartup.Owned || !exitStartup.Running)DriverShutdown.Unload(lastEngine??(exitStartup.Owned?exitStartup.Snapshot:null),line=>HostWire.Write(pipe,new{type="log",text=line}));
+                                        break;
                                     default:throw new InvalidDataException("Неизвестная команда.");
                                 }
                                 var serviceState=StartupService.Read(installation);
-                                HostWire.Write(pipe,new{type="reply",running=serviceState.Owned?serviceState.Running:runner.Running,telegram_running=telegram!=null && telegram.Running,error=""});
+                                HostWire.Write(pipe,new{type="reply",running=serviceState.Owned?serviceState.Running:runner.Running,telegram_running=telegram!=null && telegram.Running,closing=done,error=""});
                             }catch(Exception ex){
                                 if(action=="start")runner.Stop();
                                 var serviceState=StartupService.Read(installation);
-                                        HostWire.Write(pipe,new{type="reply",running=serviceState.Owned?serviceState.Running:runner.Running,telegram_running=telegram!=null && telegram.Running,error=ex.Message,error_kind=ex is EngineDriverException?"driver":preparing?"setup":"strategy"});}
+                                        HostWire.Write(pipe,new{type="reply",running=serviceState.Owned?serviceState.Running:runner.Running,telegram_running=telegram!=null && telegram.Running,closing=done,error=ex.Message,error_kind=ex is EngineStopException?"stop":ex is EngineDriverException?"driver":preparing?"setup":"strategy"});}
                         }
                     }finally{if(telegram!=null)telegram.Dispose();runner.Stop();foreach(string folder in snapshots)try{CleanupSnapshot(folder,RegisteredDriverPaths());}catch{}}
                 }

@@ -65,6 +65,22 @@ namespace ZapretDesktop {
                     int priorStarts=starts;SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());toggle.Checked=false;wait();Assert(runner.Running && !runner.TelegramRunning && starts==priorStarts,"Telegram off does not reconnect Discord/YouTube");
                     SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());toggle.Checked=true;wait();tgConnections=tgStarts;runner.Stop();runner.Start(store.Current,"general.bat");runner.Stop();Assert(runner.TelegramRunning && tgStarts==tgConnections,"Strategy candidate start/stop operations preserve Telegram session");
                     change(toggle,false);wait();
+                    int releases=0;bool failRelease=false;runner.TestRelease=()=>{releases++;if(failRelease)throw new EngineStopException("Тест: WinDivert используется другой программой.");};
+                    change(discord,true);wait();change(toggle,true);wait();change(discord,false);wait();
+                    Assert(releases==0 && runner.TelegramRunning,"Explicit main stop retains the driver while Telegram needs it");
+                    change(toggle,false);wait();Assert(releases==1 && runner.IdleReleased,"Last Telegram off releases idle components");
+                    Capture(form,Path.Combine(root,"tests","window-driver-released.png"));
+                    change(discord,true);wait();Assert(!runner.IdleReleased,"Restart clears previously confirmed unloaded state");
+                    runner.Stop();Assert(releases==1,"Transient strategy stop does not release helper or driver");
+                    runner.Start(store.Current,"general.bat");change(toggle,true);wait();change(toggle,false);wait();
+                    Assert(releases==1 && runner.Running,"Telegram off retains the driver while Discord needs it");
+                    failRelease=true;priorStarts=starts;change(discord,false);wait();
+                    Assert(releases==2 && !runner.Running && !discord.Checked && starts==priorStarts && !runner.IdleReleased && !String.IsNullOrEmpty(runner.StopWarning),"Unload failure keeps bypass off, reports warning and never restarts it");
+                    Assert(!DiscordFilter.Enabled(store.Current),"Unload failure preserves the explicitly disabled main mode");
+                    Capture(form,Path.Combine(root,"tests","window-driver-release-warning.png"));
+                    change(toggle,true);wait();int priorTelegramStarts=tgStarts;change(toggle,false);wait();
+                    Assert(releases==3 && !runner.TelegramRunning && !toggle.Checked && tgStarts==priorTelegramStarts && !TelegramFilter.Enabled(store.Current),"Last Telegram unload failure also stays off without reconnecting");
+                    failRelease=false;runner.TestRelease=null;
                     using(var heartbeat=new System.Windows.Forms.Timer{Interval=25}){
                         int beats=0;heartbeat.Tick+=(s,e)=>beats++;heartbeat.Start();
                         slowBase=true;var click=Stopwatch.StartNew();change(discord,true);
@@ -524,6 +540,7 @@ namespace ZapretDesktop {
                 var root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".."));
                 var local = Path.GetFullPath(Path.Combine(root, "..", "zapret-discord-youtube-1.10.2"));
                 var official = Path.Combine(root, "downloads", "official-1.10.3", "zapret-discord-youtube-1.10.3");
+                if(args.Contains("--shutdown-only")){DriverShutdownTests(root);Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);TelegramTests(root,official);Console.WriteLine("PASS: "+count+" shutdown checks");return 0;}
                 if(args.Contains("--telegram-only")){Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);TelegramTests(root,official);TelegramTransportTests(root,official);Console.WriteLine("PASS: "+count+" Telegram checks");return 0;}
                 if(args.Contains("--core-updates-only")){
                     CoreUpdateTests(root,official).GetAwaiter().GetResult();Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);Core104UiTests(root,official);Console.WriteLine("PASS: "+count+" core update checks");return 0;
@@ -536,7 +553,7 @@ namespace ZapretDesktop {
                         Console.WriteLine(target.Name+": state="+result.State+", route="+result.DnsRoute+", "+result.Detail);if(result.State!=1)return 1;
                     }return 0;
                 }
-                local=official;YouTubeDnsFallbackTests(root).GetAwaiter().GetResult();YouTubeDnsTests(root).GetAwaiter().GetResult();StartupTests(root,official);SecurityTests(root,official);LegacyMigrationTest(root); DriverRecoveryTests(root); FeedbackAndDriverTests(root,official).GetAwaiter().GetResult(); SelectionTests().GetAwaiter().GetResult(); ServiceProbeTests().GetAwaiter().GetResult(); DomainTests(root); UpdateFeedTests().GetAwaiter().GetResult(); CoreUpdateTests(root,official).GetAwaiter().GetResult(); AppUpdateSessionTests(root).GetAwaiter().GetResult(); StageTests(root).GetAwaiter().GetResult(); ShellReplacementTest(root); ShellRollbackTest(root); ShellHandshakeTest(root);
+                local=official;YouTubeDnsFallbackTests(root).GetAwaiter().GetResult();YouTubeDnsTests(root).GetAwaiter().GetResult();StartupTests(root,official);SecurityTests(root,official);LegacyMigrationTest(root); DriverRecoveryTests(root); DriverShutdownTests(root); FeedbackAndDriverTests(root,official).GetAwaiter().GetResult(); SelectionTests().GetAwaiter().GetResult(); ServiceProbeTests().GetAwaiter().GetResult(); DomainTests(root); UpdateFeedTests().GetAwaiter().GetResult(); CoreUpdateTests(root,official).GetAwaiter().GetResult(); AppUpdateSessionTests(root).GetAwaiter().GetResult(); StageTests(root).GetAwaiter().GetResult(); ShellReplacementTest(root); ShellRollbackTest(root); ShellHandshakeTest(root);
                 foreach (var engine in new[] {local, official}.Distinct()) {
                     Strategy.ValidateEngine(engine);
                     var profiles = Directory.GetFiles(engine, "general*.bat"); Assert(profiles.Length == 22, "22 upstream profiles expected");
@@ -1202,6 +1219,58 @@ namespace ZapretDesktop {
             var partial=Enumerable.Range(0,ServiceChecks.Targets.Length).Select(i=>new CheckResult{State=i==4?0:1}).ToArray();
             var selected=await StrategySelector.Run(new[]{"api-only"},(name,token)=>Task.FromResult(0),()=>{},token=>Task.FromResult(partial),CancellationToken.None,null,null,true);
             Assert(selected.Winner==null,"Strategy with website and Gateway working but updater blocked is not auto-selected");
+        }
+        static void DriverShutdownTests(string root) {
+            string folder=Path.Combine(root,"tests","fixture-stop-"+Guid.NewGuid().ToString("N"));
+            string owned=Path.Combine(folder,"runtime-"+new string('a',32),"bin","WinDivert64.sys");
+            Func<DriverRegistration> fresh=()=>new DriverRegistration{Path=owned,Type=1,Start=3,State=4};
+            DriverRegistration value=fresh();int stops=0,deletes=0,probes=0;
+            Action stop=()=>{stops++;value.State=1;},delete=()=>{deletes++;value=null;};
+            Func<bool> empty=()=>{probes++;return false;};
+            Assert(DriverShutdown.Release(()=>value,stop,delete,empty,folder) && stops==1 && deletes==1 && probes==2,"Last consumer stops and removes only the protected driver registration");
+            Assert(DriverShutdown.Release(()=>null,()=>{throw new Exception();},()=>{throw new Exception();},()=>{throw new Exception();},folder),"Absent driver needs no installation, consumer probe or service mutation");
+            value=fresh();value.State=1;probes=stops=deletes=0;
+            Assert(DriverShutdown.Release(()=>value,stop,delete,empty,folder) && stops==0 && deletes==1 && probes==0,"Already unloaded owned driver only removes its registration");
+            foreach(string path in new[]{Path.Combine(folder,"..","other","WinDivert64.sys"),Path.Combine(folder,"runtime-invalid","bin","WinDivert64.sys"),Path.Combine(folder,"runtime-"+new string('a',32),"bin","other.sys")}){
+                value=fresh();value.Path=path;stops=deletes=0;bool refused=false;try{DriverShutdown.Release(()=>value,stop,delete,empty,folder);}catch(EngineStopException){refused=true;}Assert(refused && stops==0 && deletes==0,"Unowned or malformed driver is preserved: "+path);
+            }
+            Assert(DriverShutdown.OwnedPath(folder,owned) && DriverShutdown.OwnedPath(folder,owned.Replace("runtime-","startup-")),"Protected runtime and startup driver paths are recognized");
+            foreach(uint type in new uint[]{0,2,16}){value=fresh();value.Type=type;stops=deletes=0;bool refused=false;try{DriverShutdown.Release(()=>value,stop,delete,empty,folder);}catch(EngineStopException){refused=true;}Assert(refused && stops==0 && deletes==0,"Non-kernel service is never stopped: "+type);}
+            foreach(uint start in new uint[]{0,1,2,4}){value=fresh();value.Start=start;stops=deletes=0;bool refused=false;try{DriverShutdown.Release(()=>value,stop,delete,empty,folder);}catch(EngineStopException){refused=true;}Assert(refused && stops==0 && deletes==0,"Unexpected driver start type is preserved: "+start);}
+            for(int occupied=1;occupied<=2;occupied++){
+                value=fresh();stops=deletes=probes=0;bool refused=false;int threshold=occupied;
+                try{DriverShutdown.Release(()=>value,stop,delete,()=>++probes>=threshold,folder);}catch(EngineStopException){refused=true;}
+                Assert(refused && stops==0 && deletes==0,"Existing or newly arrived consumer prevents unloading: "+occupied);
+            }
+            value=fresh();stops=deletes=0;int reads=0;bool changed=false;
+            try{DriverShutdown.Release(()=>{if(++reads==2)value.Path=owned.Replace(new string('a',32),new string('b',32));return value;},stop,delete,empty,folder);}catch(EngineStopException){changed=true;}
+            Assert(changed && stops==0 && deletes==0,"Service path changing between inspections cancels unload");
+            value=fresh();deletes=0;bool unconfirmed=false;try{DriverShutdown.Release(()=>value,()=>{},delete,empty,folder);}catch(EngineStopException){unconfirmed=true;}
+            Assert(unconfirmed && deletes==0,"Driver not confirmed stopped is never deleted or reported unloaded");
+            value=fresh();bool denied=false;try{DriverShutdown.Release(()=>value,()=>{throw new System.ComponentModel.Win32Exception(5);},delete,empty,folder);}catch(System.ComponentModel.Win32Exception){denied=true;}
+            Assert(denied,"Stop permission failure propagates without false success");
+            value=fresh();bool pending=false;try{DriverShutdown.Release(()=>value,stop,()=>{},empty,folder);}catch(EngineStopException){pending=true;}
+            Assert(pending,"Retained service registration is not reported as fully released");
+            var previousRead=StartupService.TestRead;StartupService.TestRead=_=>new StartupState();
+            try{using(var client=new EngineRunner()){
+                for(int cycle=0;cycle<4;cycle++){
+                    Console.WriteLine("Checking idle pipe close: cycle "+cycle);
+                    string pipeName="ByPass-stop-test-"+Guid.NewGuid().ToString("N");bool warn=cycle==1 || cycle==3,missingConfirmation=cycle==3;
+                    using(var server=new System.IO.Pipes.NamedPipeServerStream(pipeName,System.IO.Pipes.PipeDirection.InOut,1,System.IO.Pipes.PipeTransmissionMode.Byte,System.IO.Pipes.PipeOptions.Asynchronous)){
+                        var connection=server.BeginWaitForConnection(null,null);
+                        var peer=Task.Run(()=>{using(var pipe=new System.IO.Pipes.NamedPipeClientStream(".",pipeName,System.IO.Pipes.PipeDirection.InOut)){
+                            pipe.Connect(5000);var command=HostWire.Read(pipe);if((string)command["action"]!="release-idle")throw new Exception("Unexpected idle command");
+                            HostWire.Write(pipe,new{type="reply",running=false,telegram_running=false,closing=!missingConfirmation,error=warn && !missingConfirmation?"Test driver busy":"",error_kind=warn?"stop":""});
+                        }});
+                        if(!connection.AsyncWaitHandle.WaitOne(5000)){if(peer.IsFaulted)peer.GetAwaiter().GetResult();throw new Exception("Test pipe connection timed out");}
+                        server.EndWaitForConnection(connection);client.TestAttach(server);bool failed=false;
+                        try{client.ReleaseIfIdle();}catch(EngineStopException){failed=true;}
+                        peer.GetAwaiter().GetResult();
+                        Assert(failed==warn && client.IdleReleased!=warn && !client.Running && !client.TelegramRunning,"Real pipe idle close drains reply/EOF and preserves stop result: cycle "+cycle);
+                        Assert(warn?!String.IsNullOrEmpty(client.StopWarning):String.IsNullOrEmpty(client.StopWarning),"Cleanup warning follows protocol instead of being treated as start failure: cycle "+cycle);
+                    }
+                }
+            }}finally{StartupService.TestRead=previousRead;}
         }
         static void DriverRecoveryTests(string root) {
             string folder=Path.Combine(root,"tests","fixture-driver-recovery-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(folder);

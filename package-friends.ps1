@@ -26,6 +26,7 @@ if($OwnerSignature) {
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'LICENSE') -Destination $appDir
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'licenses') -Destination (Join-Path $appDir 'licenses') -Recurse
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'TESTING-GUIDE.txt') -Destination (Join-Path $appDir 'GUIDE.txt')
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'docs\DRIVER-SHUTDOWN.md') -Destination (Join-Path $appDir 'DRIVER-SHUTDOWN.txt')
 $unpacked = Join-Path $stage 'official'
 Expand-Archive -LiteralPath $archive -DestinationPath $unpacked
 $engine = Join-Path $appDir 'data\engines\1.10.4'

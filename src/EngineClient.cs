@@ -11,10 +11,12 @@ using System.Threading.Tasks;
 
 namespace ZapretDesktop {
     public sealed class EngineRunner : IDisposable {
-        NamedPipeServerStream pipe;Task reader;string helperHash;Timer observer;
+        NamedPipeServerStream pipe;Task reader;string helperHash;Timer observer;Process helper;
         readonly object gate=new object();readonly AutoResetEvent response=new AutoResetEvent(false);
         Dictionary<string,object> reply;volatile bool running,connected,ready,telegramRunning;Exception failure;volatile string driverFailure;
         internal bool TelegramRunning{get{return telegramRunning;}}
+        internal bool IdleReleased {get;private set;}
+        internal string StopWarning {get;private set;}
         public event Action<string> Log;
         volatile StartupState startup=new StartupState();
         internal bool StartupEnabled {get{return startup.Owned;}}
@@ -27,6 +29,8 @@ namespace ZapretDesktop {
         internal Func<bool> ConflictCheck=null; internal Action<bool,string,string> TestStartupChange=null;
         internal Action<string,string> TestStart=null,TestSync=null;internal Action TestStop=null,TestStopExternal=null;
         internal Action<string,bool> TestTelegram=null;
+        internal Action TestRelease=null;
+        internal void TestAttach(NamedPipeServerStream session){pipe=session;connected=true;IdleReleased=false;StopWarning=null;reader=ReadReplies(session);}
 #endif
         public bool Conflict {
             get {
@@ -68,26 +72,30 @@ namespace ZapretDesktop {
                         Trust.NoLinks(actual);
                         if(!String.Equals(actual,expected,StringComparison.OrdinalIgnoreCase) || Trust.Hash(actual)!=helperHash)throw new InvalidDataException("Неизвестный компонент запуска.");
                     }
+                    if(helper!=null)helper.Dispose();helper=Process.GetProcessById((int)peer);
                     connected=true;failure=null;
-                    reader=Task.Run(()=>{try{while(connected){var message=HostWire.Read(pipe);string type=(string)message["type"];if(type=="reply"){reply=message;response.Set();}else if(type=="log"){string line=(string)message["text"];if(EngineDriverException.IsFailure(line))driverFailure=line;if(line.Contains("windivert initialized. capture is started."))ready=true;if(Log!=null)Log(line);}}}catch(Exception ex){failure=ex;connected=false;running=false;telegramRunning=false;response.Set();}});
+                    reader=ReadReplies(pipe);
                     if(observer==null)observer=new Timer(_=>{if(!Monitor.TryEnter(gate))return;try{if(connected)Ask("status",null,null);}catch{running=false;}finally{Monitor.Exit(gate);}},null,800,800);
                 }
             }catch{connected=false;pipe.Dispose();pipe=null;throw;}
             finally{try{Directory.Delete(staging,true);}catch{}}
         }
-        void Ask(string action,string engine,string strategy) {
+        Task ReadReplies(NamedPipeServerStream session){return Task.Run(()=>{try{while(connected){var message=HostWire.Read(session);string type=(string)message["type"];if(type=="reply"){reply=message;response.Set();}else if(type=="log"){string line=(string)message["text"];if(EngineDriverException.IsFailure(line))driverFailure=line;if(line.Contains("windivert initialized. capture is started."))ready=true;if(Log!=null)Log(line);}}}catch(Exception ex){failure=ex;connected=false;running=false;telegramRunning=false;response.Set();}});}
+        bool Ask(string action,string engine,string strategy) {
             lock(gate) {
                 if(!connected)throw new IOException("Компонент запуска отключён.");reply=null;response.Reset();
                 HostWire.Write(pipe,new{action=action,engine=engine,strategy=strategy});
                 if(!response.WaitOne(45000)){connected=false;pipe.Dispose();running=false;throw new IOException("Компонент запуска не ответил.");}
                 if(reply==null)throw new IOException("Связь с компонентом запуска прервана.",failure);
-                running=Convert.ToBoolean(reply["running"]);object tgState;telegramRunning=reply.TryGetValue("telegram_running",out tgState) && Convert.ToBoolean(tgState);RefreshStartup();if(!running)ready=false;string error=(string)reply["error"];
-                if(error.Length>0){object kind;if(reply.TryGetValue("error_kind",out kind) && (string)kind=="driver")throw new EngineDriverException(error);if(reply.TryGetValue("error_kind",out kind) && (string)kind=="setup")throw new EngineSetupException("Не удалось подготовить ядро.\n"+error);throw new EngineStartException(error);}
+                var result=reply;running=Convert.ToBoolean(result["running"]);object tgState;telegramRunning=result.TryGetValue("telegram_running",out tgState) && Convert.ToBoolean(tgState);RefreshStartup();if(!running)ready=false;string error=(string)result["error"];
+                object closing;bool closed=result.TryGetValue("closing",out closing) && Convert.ToBoolean(closing);if(closed)Disconnect();
+                if(error.Length>0){object kind;if(result.TryGetValue("error_kind",out kind) && (string)kind=="stop")throw new EngineStopException(error);if(result.TryGetValue("error_kind",out kind) && (string)kind=="driver")throw new EngineDriverException(error);if(result.TryGetValue("error_kind",out kind) && (string)kind=="setup")throw new EngineSetupException("Не удалось подготовить ядро.\n"+error);throw new EngineStartException(error);}
+                return closed;
             }
         }
         public void Start(string engine,string strategy) {
             lock(gate) {
-            ready=false;driverFailure=null;
+            ready=false;driverFailure=null;IdleReleased=false;StopWarning=null;
             try {
                 Trust.VerifyEngine(engine);
 #if TESTING
@@ -104,6 +112,26 @@ namespace ZapretDesktop {
             if(TestStop!=null){TestStop();running=false;return;}
 #endif
             if(StartupEnabled && !connected)Connect();if(connected)Ask("stop",null,null);running=false;}}
+        // Explicit user stop only. Selection/update stops keep their session.
+        internal void ReleaseIfIdle(){lock(gate){
+            if(Running || telegramRunning)return;
+            if(!connected && IdleReleased)return;
+            IdleReleased=false;StopWarning=null;
+            try{
+#if TESTING
+                if(TestRelease!=null){TestRelease();IdleReleased=true;return;}
+                if(TestStop!=null || TestTelegram!=null){IdleReleased=true;return;}
+#endif
+                Connect();bool closed=Ask("release-idle",null,null);
+                if(!closed && !Running && !telegramRunning)throw new EngineStopException("Обходы выключены, но помощник не подтвердил полную остановку.");
+                IdleReleased=closed;
+            }catch(Exception ex){StopWarning=ex.Message;throw new EngineStopException(ex.Message,ex);}
+        }}
+        void Disconnect(){
+            connected=false;if(pipe!=null){pipe.Dispose();pipe=null;}
+            if(reader!=null){if(!reader.Wait(3000))throw new EngineStopException("Обходы остановлены, но канал помощника ещё закрывается.");reader=null;}
+            if(helper!=null){if(!helper.WaitForExit(8000))throw new EngineStopException("Обходы остановлены, но помощник ещё не завершился. Подробности — в журнале.");helper.Dispose();helper=null;}
+        }
         internal void SetStartup(bool enabled,string engine,string strategy) {
             lock(gate){
 #if TESTING
@@ -133,6 +161,7 @@ namespace ZapretDesktop {
             }
         }
         internal void SetTelegram(string engine,bool enabled){lock(gate){
+            if(enabled){IdleReleased=false;StopWarning=null;}
 #if TESTING
             if(TestTelegram!=null){TestTelegram(engine,enabled);telegramRunning=enabled;return;}
 #endif
@@ -144,6 +173,6 @@ namespace ZapretDesktop {
             if(TestStopExternal!=null){TestStopExternal();return;}
 #endif
             Connect();Ask("stop-external",null,null);}}
-        public void Dispose(){if(observer!=null)observer.Dispose();lock(gate){try{if(connected)Ask("shutdown",null,null);}catch{}connected=false;if(pipe!=null)pipe.Dispose();if(reader!=null)try{reader.Wait(2000);}catch{}}response.Dispose();}
+        public void Dispose(){if(observer!=null)observer.Dispose();lock(gate){try{if(connected)Ask("shutdown",null,null);}catch{}connected=false;if(pipe!=null)pipe.Dispose();if(reader!=null)try{reader.Wait(2000);}catch{}if(helper!=null)helper.Dispose();}response.Dispose();}
     }
 }

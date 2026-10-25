@@ -113,7 +113,12 @@ namespace ZapretDesktop {
         }
         internal static void Stop(string installation) {
             var state=Require(installation);if(!state.Installed)return;
-            StopNative();
+            Process process=null;
+            try {
+                if(state.ProcessId!=0){try{process=Process.GetProcessById((int)state.ProcessId);}catch(ArgumentException){}}
+                StopNative();
+                if(process!=null && !process.WaitForExit(5000))throw new EngineStopException("Служба обхода остановлена, но её процесс ещё не завершился. Повторите выключение.");
+            }finally{if(process!=null)process.Dispose();}
         }
         static void StopNative() {
             using(var service=new ServiceController(Name)) {

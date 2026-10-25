@@ -227,13 +227,13 @@ namespace ZapretDesktop {
                 InvalidateChecks("Режим "+(discordMode?"Discord":"Telegram")+" изменён · проверка требуется заново");await StopChecks();
                 if(discordMode){
                     await Task.Run(()=>DiscordFilter.Set(store.Current,enabled));
-                    if(enabled)await StartEngine(strategy,CancellationToken.None);else await Task.Run(()=>runner.Stop());
-                }else await Task.Run(()=>{TelegramFilter.Set(store.Current,enabled);runner.SetTelegram(store.Current,enabled);});
+                    if(enabled)await StartEngine(strategy,CancellationToken.None);else await Task.Run(()=>{runner.Stop();runner.ReleaseIfIdle();});
+                }else await Task.Run(()=>{TelegramFilter.Set(store.Current,enabled);runner.SetTelegram(store.Current,enabled);if(!enabled)runner.ReleaseIfIdle();});
                 Append((discordMode?"Discord и YouTube":"Telegram")+(enabled?": обход включён.":": обход выключен."));
             }catch(Exception ex){failure=ex;}
             if(failure!=null){
                 Error(failure);
-                try {
+                if(enabled)try {
                     if(discordMode){await Task.Run(()=>{runner.Stop();DiscordFilter.Set(store.Current,previousFlag);});if(previous)await StartEngine(strategy,CancellationToken.None);}
                     else await Task.Run(()=>{TelegramFilter.Set(store.Current,previousFlag);runner.SetTelegram(store.Current,previous);});
                 }catch(Exception recovery){Error(recovery);}
@@ -428,7 +428,7 @@ namespace ZapretDesktop {
             if(previouslyOn && !on && !scanning && !starting && !exiting) { InvalidateChecks("Ядро остановлено · проверка требуется заново"); if(checkCancellation!=null)checkCancellation.Cancel(); }
             previouslyOn=on;
             state.Text = scanning ? "Подбираем стратегию" : on ? (runner.TelegramRunning?"Оба обхода включены":"Discord и YouTube включены") : runner.TelegramRunning?"Telegram включён":external?"Другой обход запущен":"Сервисы выключены"; state.ForeColor=on || runner.TelegramRunning?Theme.Success:external?Theme.Warning:Theme.Text;
-            subtitle.Text = scanning ? (scanStep.Length>0?scanStep:"Проверяем сетевые пробы…") : on ? Theme.StrategyName(activeStrategy) : runner.TelegramRunning?"Основная стратегия выключена · Telegram работает отдельно":external?"Другой обход можно отключить в «Настройки»":"Включите нужный тумблер";
+            subtitle.Text = scanning ? (scanStep.Length>0?scanStep:"Проверяем сетевые пробы…") : on ? Theme.StrategyName(activeStrategy) : runner.TelegramRunning?"Основная стратегия выключена · Telegram работает отдельно":external?"Другой обход можно отключить в «Настройки»":!String.IsNullOrEmpty(runner.StopWarning)?"Обходы выключены · полная остановка не подтверждена":runner.IdleReleased?"Обходы выключены · драйвер выгружен":"Включите нужный тумблер";
             profiles.Enabled = categories.Enabled = !busy && !starting && !scanning;
             games.Enabled = tcp.Enabled = udp.Enabled = saveGameButton.Enabled = !on && !external && !busy && !starting && !scanning; domainEditor.SetAllowed(!external && !busy && !starting && !scanning,on);
             dashboard.ScanMode.Enabled = !busy && !starting && !scanning;
