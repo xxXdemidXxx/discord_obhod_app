@@ -57,11 +57,46 @@ namespace ZapretDesktop {
             if(manifest==null)throw new InvalidDataException("Для последнего выпуска нет подписанных данных обновления. Попробуйте позже.");
             return Parse(manifest);
         }
+        public async Task<string[]> Versions(int page=1) {
+            if(page<1 || page>20)throw new ArgumentOutOfRangeException("page");
+            var versions=new List<string>();var publishedAssets=new Dictionary<string,ArrayList>();for(int currentPage=page;currentPage<=20;currentPage++){
+                string json=await GitHubMetadata.Get(client,"https://api.github.com/repos/"+Repository+"/releases?per_page=30&page="+currentPage);
+                var data=new JavaScriptSerializer{MaxJsonLength=1024*1024}.Deserialize<ArrayList>(json);if(data==null)throw new InvalidDataException("GitHub не вернул список выпусков.");
+                foreach(var value in data){var item=value as Dictionary<string,object>;object tag,draft,preview;if(item==null || !item.TryGetValue("tag_name",out tag) || !item.TryGetValue("draft",out draft) || !item.TryGetValue("prerelease",out preview))continue;
+                    if(Convert.ToBoolean(draft) || Convert.ToBoolean(preview))continue;string name=tag as string;if(name!=null && Regex.IsMatch(name,@"^v\d+\.\d+\.\d+$")){object assets;if(!item.TryGetValue("assets",out assets) || !(assets is ArrayList))continue;versions.Add(name.Substring(1));publishedAssets[name.Substring(1)]=(ArrayList)assets;}}
+                if(data.Count<30)break;
+            }
+            using(var slots=new SemaphoreSlim(4)){
+                var checkedVersions=await Task.WhenAll(versions.Distinct().Select(async version=>{await slots.WaitAsync();try{
+                    var release=await Exact(version);string proof=await GitHubMetadata.Get(client,"https://github.com/"+Repository+"/releases/download/v"+version+"/"+OwnerIdentity.ProofName,true);
+                    if(proof==null || !publishedAssets[version].OfType<Dictionary<string,object>>().Any(asset=>PublishedAssetMatches(asset,release)))return null;OwnerIdentity.VerifyRelease(proof,release.Proof,version);return version;
+                }catch(InvalidDataException){return null;}catch(UpdateCheckException){return null;}finally{slots.Release();}}));
+                return checkedVersions.Where(x=>x!=null).OrderByDescending(x=>new Version(x)).ToArray();
+            }
+        }
+        static bool PublishedAssetMatches(Dictionary<string,object> asset,Release release){
+            object url,size,digest;if(!asset.TryGetValue("browser_download_url",out url) || !asset.TryGetValue("size",out size) || Convert.ToString(url)!=release.Url)return false;
+            try{return Convert.ToInt64(size)==release.Size && (!asset.TryGetValue("digest",out digest) || String.IsNullOrEmpty(Convert.ToString(digest)) || String.Equals(Convert.ToString(digest),release.Digest,StringComparison.OrdinalIgnoreCase));}catch(FormatException){return false;}catch(OverflowException){return false;}
+        }
+        public async Task<Release> Exact(string version) {
+            if(!Regex.IsMatch(version??"",@"^\d+\.\d+\.\d+$"))throw new InvalidDataException("Некорректная версия оболочки.");
+            string manifest=await GitHubMetadata.Get(client,"https://github.com/"+Repository+"/releases/download/v"+version+"/update.json",true);
+            if(manifest==null)throw new InvalidDataException("У этой версии нет подписанных данных установки. Выберите другой выпуск.");
+            var release=ParseVerified(manifest,false);if(release==null || release.Version!=version)throw new InvalidDataException("Подписанный выпуск не соответствует выбранной версии.");return release;
+        }
         public static void ValidateBinary(string path,string version) {
             var name=AssemblyName.GetAssemblyName(path);
             if(name.Name!="Obhod" && !name.Name.StartsWith("Obhod-",StringComparison.Ordinal))throw new InvalidDataException("Архив содержит другое приложение.");
             if(name.Version.ToString(3)!=version)throw new InvalidDataException("Версия EXE отличается от версии релиза.");
         }
+        internal static string PrepareRuntimeCompatibility(string prepared,string engine){
+            // Only shell-owned mutable settings are quarantined for old shells.
+            // The core executable, version and upstream lists are never replaced.
+            string scope=Path.Combine(engine,ServiceScope.RelativePath);if(!File.Exists(scope))return null;
+            if(Assembly.ReflectionOnlyLoad(File.ReadAllBytes(prepared)).GetType("ZapretDesktop.ServiceScope",false)!=null)return null;
+            Trust.NoLinks(scope);string backup=Path.Combine(Path.GetDirectoryName(prepared),"service-scope-before-install.json");Trust.NoLinks(backup);File.Copy(scope,backup,true);File.Delete(scope);return backup;
+        }
+        internal static void RestoreRuntimeCompatibility(string backup,string engine){if(backup==null)return;string scope=Path.Combine(engine,ServiceScope.RelativePath);Trust.NoLinks(scope);Trust.NoLinks(backup);File.Copy(backup,scope,true);}
         public Task<string> Stage(Release release,string root) {return Stage(release,root,null,CancellationToken.None);}
         public async Task<string> Stage(Release release,string root,IProgress<int> progress,CancellationToken token) {
             using(var timeout=CancellationTokenSource.CreateLinkedTokenSource(token)) {

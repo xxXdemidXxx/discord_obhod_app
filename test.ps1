@@ -1,6 +1,6 @@
-param([switch]$Network,[switch]$CoreUpdatesOnly,[switch]$TelegramOnly,[switch]$ShutdownOnly)
+param([switch]$Network,[switch]$CoreUpdatesOnly,[switch]$TelegramOnly,[switch]$ShutdownOnly,[switch]$EnginesOnly,[switch]$ProxyNative)
 $ErrorActionPreference = 'Stop'
-if(-not $CoreUpdatesOnly -and -not $TelegramOnly -and -not $ShutdownOnly){
+if(-not $CoreUpdatesOnly -and -not $TelegramOnly -and -not $ShutdownOnly -and -not $EnginesOnly){
     & "$PSScriptRoot\tests\PortableKeyTests.ps1"
     & "$PSScriptRoot\tests\ReleaseFlowTests.ps1"
     & "$PSScriptRoot\tools\test-owner-assistant.ps1"
@@ -25,14 +25,14 @@ try {
     } finally {$public.Dispose()}
     [IO.File]::WriteAllText("$fixture\catalogue.json",(Add-ByPassSignature -Json ([Text.Encoding]::UTF8.GetString($bytes)) -Key $rsa))
 } finally {$rsa.Dispose()}
-$resources=@("/resource:$fixture\public.xml,ZapretDesktop.UpdatePublicKey", "/resource:$fixture\catalogue.json,ZapretDesktop.EngineTrust", "/resource:$PSScriptRoot\assets\ByPass.ico,ZapretDesktop.Icon")
+$resources=@("/resource:$fixture\public.xml,ZapretDesktop.UpdatePublicKey", "/resource:$fixture\catalogue.json,ZapretDesktop.EngineTrust", "/resource:$PSScriptRoot\assets\ByPass.ico,ZapretDesktop.Icon", "/resource:$PSScriptRoot\licenses\ByeDPI-MIT.txt,ZapretDesktop.ByeDpiLicense")
 $output = Join-Path $PSScriptRoot 'tests\Tests.exe'
-& $compiler /nologo /define:TESTING /target:exe /main:ZapretDesktop.Tests /platform:x64 @resources "/win32manifest:$PSScriptRoot\app.manifest" "/out:$output" /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.ServiceProcess.dll /reference:System.Web.Extensions.dll /reference:System.Net.Http.dll /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll $source (Join-Path $PSScriptRoot 'tests\Tests.cs') (Join-Path $PSScriptRoot 'tests\TelegramMediaTests.cs')
+& $compiler /nologo /define:TESTING /target:exe /main:ZapretDesktop.Tests /platform:x64 @resources "/win32manifest:$PSScriptRoot\app.manifest" "/out:$output" /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.ServiceProcess.dll /reference:System.Web.Extensions.dll /reference:System.Net.Http.dll /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll $source (Join-Path $PSScriptRoot 'tests\Tests.cs') (Join-Path $PSScriptRoot 'tests\EngineWorkspaceTests.cs') (Join-Path $PSScriptRoot 'tests\TelegramMediaTests.cs')
 if ($LASTEXITCODE -ne 0) { throw 'Test build failed' }
 & $compiler /nologo /define:TESTING /target:winexe /main:ZapretDesktop.UpdateProbe /platform:x64 @resources "/out:$PSScriptRoot\tests\Obhod-probe.exe" /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.ServiceProcess.dll /reference:System.Web.Extensions.dll /reference:System.Net.Http.dll /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll $source (Join-Path $PSScriptRoot 'tests\UpdateProbe.cs')
 if ($LASTEXITCODE -ne 0) { throw 'Update probe build failed' }
-$legacy=@('tests\legacy-0.4\ShellUpdates.cs','src\Updates.cs','src\Engine.cs','src\Trust.cs','src\UpstreamTrust.cs','src\OwnerIdentity.cs','src\OwnedJob.cs','src\GitHubMetadata.cs','tests\LegacyBridge.cs') | ForEach-Object {Join-Path $PSScriptRoot $_}
+$legacy=@('tests\legacy-0.4\ShellUpdates.cs','src\Updates.cs','src\Engine.cs','src\ServiceScope.cs','src\Trust.cs','src\UpstreamTrust.cs','src\OwnerIdentity.cs','src\OwnedJob.cs','src\GitHubMetadata.cs','tests\LegacyBridge.cs') | ForEach-Object {Join-Path $PSScriptRoot $_}
 & $compiler /nologo /target:exe /main:LegacyBridge /platform:x64 @resources "/out:$PSScriptRoot\tests\LegacyBridge.exe" /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.ServiceProcess.dll /reference:System.Web.Extensions.dll /reference:System.Net.Http.dll /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll $legacy
 if ($LASTEXITCODE -ne 0) {throw 'Legacy updater bridge build failed'}
-if($ShutdownOnly){& $output --shutdown-only} elseif($TelegramOnly){& $output --telegram-only} elseif($CoreUpdatesOnly){& $output --core-updates-only} elseif ($Network) { & $output --network } else { & $output }
+if($EnginesOnly){if($ProxyNative){& $output --engines-only --proxy-native}else{& $output --engines-only}} elseif($ShutdownOnly){& $output --shutdown-only} elseif($TelegramOnly){& $output --telegram-only} elseif($CoreUpdatesOnly){& $output --core-updates-only} elseif ($Network) { & $output --network } else { & $output }
 if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }

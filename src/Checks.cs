@@ -43,6 +43,13 @@ namespace ZapretDesktop {
             new ServiceTarget("GitHub · обновления", "https://github.com/xxXdemidXxx/discord_obhod_app/releases/latest")
         };
         static HttpClientHandler DirectHandler(){return new HttpClientHandler{UseProxy=false,AllowAutoRedirect=false,AutomaticDecompression=DecompressionMethods.GZip|DecompressionMethods.Deflate};}
+        internal static Task<CheckResult> RunProxy(ServiceTarget target,CancellationToken token,int port,int timeoutSeconds=12){
+#if TESTING
+            if(TestRun!=null)return TestRun(target,token);
+#endif
+            var proxy=new WebProxy("http://127.0.0.1:"+port,false);var handler=DirectHandler();handler.UseProxy=true;handler.Proxy=proxy;
+            return Run(target,token,timeoutSeconds,handler,(url,cancel)=>CheckGateway(url,cancel,proxy));
+        }
         internal static bool YouTubeTarget(ServiceTarget target){
             Uri url;return target.Kind==ProbeKind.Http && Uri.TryCreate(target.Url,UriKind.Absolute,out url) && url.Scheme=="https" && url.IsDefaultPort && url.UserInfo.Length==0 && (url.Host=="www.youtube.com" || url.Host=="i.ytimg.com");
         }
@@ -234,9 +241,10 @@ namespace ZapretDesktop {
             var ack = Parse(await Receive(socket, token));
             if (!ack.TryGetValue("op", out op) || !(op is int) || (int)op != 11) throw new InvalidDataException("Gateway не подтвердил heartbeat");
         }
-        static async Task CheckGateway(Uri url, CancellationToken token) {
+        static Task CheckGateway(Uri url,CancellationToken token){return CheckGateway(url,token,null);}
+        static async Task CheckGateway(Uri url, CancellationToken token,IWebProxy proxy) {
             using (var socket = new ClientWebSocket()) {
-                socket.Options.Proxy = null;
+                socket.Options.Proxy = proxy;
                 using (token.Register(() => socket.Abort())) {
                     await socket.ConnectAsync(url, token);
                     await VerifyGateway(socket, token);
@@ -257,11 +265,11 @@ namespace ZapretDesktop {
             }
             return new CheckResult { State = 0, Failure = failure, Detail = detail + " | " + error.GetBaseException().Message, Milliseconds = elapsed };
         }
-        public static async Task<CheckResult[]> Batch(CancellationToken token, Action<int, CheckResult> completed, int timeoutSeconds = 12, Func<ServiceTarget,bool> enabled=null,CheckResult telegramSnapshot=null) {
+        public static async Task<CheckResult[]> Batch(CancellationToken token, Action<int, CheckResult> completed, int timeoutSeconds = 12, Func<ServiceTarget,bool> enabled=null,CheckResult telegramSnapshot=null,Func<ServiceTarget,CancellationToken,int,Task<CheckResult>> transport=null) {
             ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
             ServicePointManager.DnsRefreshTimeout = 0;
             return await Task.WhenAll(Targets.Select(async (target,index) => {
-                var result = enabled!=null && !enabled(target)?new CheckResult{State=3,Detail="Обход сервиса выключен · проба пропущена"}:target.Kind==ProbeKind.Telegram && telegramSnapshot!=null?telegramSnapshot:await Run(target, token, timeoutSeconds);
+                var result = enabled!=null && !enabled(target)?new CheckResult{State=3,Detail="Обход сервиса выключен · проба пропущена"}:target.Kind==ProbeKind.Telegram && telegramSnapshot!=null?telegramSnapshot:await (transport==null?Run(target,token,timeoutSeconds):transport(target,token,timeoutSeconds));
                 token.ThrowIfCancellationRequested();
                 if (completed != null) completed(index,result);
                 return result;

@@ -14,18 +14,20 @@ namespace ZapretDesktop {
         readonly TcpListener listener;
         readonly Func<string,CancellationToken,Task<DnsAnswer>> resolve;
         readonly Func<IPAddress,int,Task<TcpClient>> connect;
+        readonly Func<string,IPAddress,int,Task<TcpClient>> route;
         readonly CancellationTokenSource lifetime=new CancellationTokenSource();
         readonly HashSet<TcpClient> clients=new HashSet<TcpClient>();
         readonly Dictionary<string,CacheEntry> cache=new Dictionary<string,CacheEntry>();
         readonly SemaphoreSlim slots=new SemaphoreSlim(96);
         readonly Task accept;
         readonly bool httpConnect;
+        readonly Func<string,bool> httpAllowed;
         int disposed;
         sealed class CacheEntry {internal DnsAnswer Answer;internal DateTime Expires;}
         internal IPAddress Address {get{return ((IPEndPoint)listener.LocalEndpoint).Address;}}
         internal int Port {get{return ((IPEndPoint)listener.LocalEndpoint).Port;}}
-        internal YouTubeDnsProxy(Func<string,CancellationToken,Task<DnsAnswer>> resolver,Func<IPAddress,int,Task<TcpClient>> connector=null,bool httpConnect=false) {
-            resolve=resolver;connect=connector??Connect;this.httpConnect=httpConnect;
+        internal YouTubeDnsProxy(Func<string,CancellationToken,Task<DnsAnswer>> resolver,Func<IPAddress,int,Task<TcpClient>> connector=null,bool httpConnect=false,Func<string,IPAddress,int,Task<TcpClient>> router=null,Func<string,bool> allowed=null) {
+            resolve=resolver;connect=connector??Connect;route=router;this.httpConnect=httpConnect;httpAllowed=allowed;
             listener=new TcpListener(IPAddress.Loopback,0);listener.Start(96);accept=Accept();
         }
         async Task Accept() {
@@ -59,7 +61,7 @@ namespace ZapretDesktop {
             if(port!=443 && port!=80)throw new IOException("Разрешены только веб-соединения.");
             return host;
         }
-        internal static string HttpDestination(Stream stream){
+        internal static string HttpDestination(Stream stream,Func<string,bool> allowed=null){
             var bytes=new List<byte>();int value;
             while(bytes.Count<8192){value=stream.ReadByte();if(value<0)throw new EndOfStreamException();bytes.Add((byte)value);int n=bytes.Count;if(n>=4 && bytes[n-4]==13 && bytes[n-3]==10 && bytes[n-2]==13 && bytes[n-1]==10)break;}
             if(bytes.Count>=8192)throw new IOException("Заголовок CONNECT слишком большой.");
@@ -67,7 +69,7 @@ namespace ZapretDesktop {
             var match=System.Text.RegularExpressions.Regex.Match(header,@"^CONNECT ([a-zA-Z0-9.-]+):443 HTTP/1\.[01]\r\n");
             if(!match.Success)throw new IOException("Разрешён только HTTPS CONNECT.");
             string host=DnsOverHttps.Host(match.Groups[1].Value);
-            if(host!="youtube.com" && !host.EndsWith(".youtube.com",StringComparison.Ordinal) && host!="ytimg.com" && !host.EndsWith(".ytimg.com",StringComparison.Ordinal))throw new IOException("Проверка DoH разрешена только для YouTube.");
+            if(allowed!=null?!allowed(host):host!="youtube.com" && !host.EndsWith(".youtube.com",StringComparison.Ordinal) && host!="ytimg.com" && !host.EndsWith(".ytimg.com",StringComparison.Ordinal))throw new IOException("Проверка не разрешена для этого сервиса.");
             return host;
         }
         async Task<DnsAnswer> Resolve(string host) {
@@ -82,7 +84,7 @@ namespace ZapretDesktop {
             try {
                 client.ReceiveTimeout=10000;client.SendTimeout=10000;client.NoDelay=true;
                 var local=client.GetStream();int port;string host;
-                if(httpConnect){host=HttpDestination(local);port=443;}
+                if(httpConnect){host=HttpDestination(local,httpAllowed);port=443;}
                 else{
                     var hello=Read(local,2);if(hello[0]!=5 || hello[1]==0)throw new IOException("Неверная версия SOCKS.");
                     var methods=Read(local,hello[1]);bool accepted=methods.Contains((byte)0);local.Write(new byte[]{5,accepted?(byte)0:(byte)255},0,2);if(!accepted)return;
@@ -91,7 +93,7 @@ namespace ZapretDesktop {
                 var answer=await Resolve(host).ConfigureAwait(false);
                 foreach(var address in answer.Addresses.Take(3)) {
                     lifetime.Token.ThrowIfCancellationRequested();
-                    try{remote=await connect(address,port).ConfigureAwait(false);break;}catch(SocketException){}catch(IOException){}
+                    try{remote=await (route==null?connect(address,port):route(host,address,port)).ConfigureAwait(false);break;}catch(SocketException){}catch(IOException){}
                 }
                 if(remote==null)throw new IOException("Не удалось подключиться к сайту.");
                 lock(clients){if(lifetime.IsCancellationRequested)throw new OperationCanceledException();clients.Add(remote);}

@@ -89,12 +89,13 @@ namespace ZapretDesktop {
                 bool earlyUpdates=store.Settings.AutoInstallShell || store.Settings.AutoInstallCore;
                 if(earlyUpdates){if((store.Settings.AutoAppUpdates || store.Settings.AutoInstallShell) && !updateOutcome)await CheckShell(true);if(IsDisposed || exiting)return;if(store.Settings.CheckUpdates || store.Settings.AutoInstallCore)await CheckUpdates(true);if(IsDisposed || exiting)return;}
                 if(auto)await AutoSelect(restoreConnection);else if(start)await ApplyStrategy();
-                if(TelegramFilter.Enabled(store.Current)){
+                if(!ProxyMode && TelegramFilter.Enabled(store.Current)){
                     busy=true;try{await Task.Run(()=>runner.SetTelegram(store.Current,true));}catch(Exception ex){Error(ex);}finally{busy=false;RefreshState();}
                 }
                 if(!earlyUpdates && !IsDisposed && store.Settings.AutoAppUpdates && !updateOutcome)await CheckShell(true);
                 if(!earlyUpdates && !IsDisposed && store.Settings.CheckUpdates)await CheckUpdates(true);
             };
+            Shown+=async(s,e)=>await InspectFootprint();
             FormClosing += (s,e) => { if (!exiting && e.CloseReason==CloseReason.UserClosing) { e.Cancel = true; Hide(); } };
         }
         Label Label(string text, float size, Color color, int x, int y, int width, int height) {
@@ -108,7 +109,7 @@ namespace ZapretDesktop {
             var b = new FlatAction { Text = text, BackColor = color, ForeColor = color == accent ? background : Color.White, FlatStyle = FlatStyle.Flat, Location = new Point(x,y), Size = new Size(width,height), Cursor = Cursors.Hand };
             b.FlatAppearance.BorderSize = 0; return b;
         }
-        Panel Page(string text) { return new Panel { Text = text, BackColor = background, ForeColor = Color.White, AutoScroll = false, Padding = new Padding(Px(24)) }; }
+        Panel Page(string text) { return new SmoothPanel { Text = text, BackColor = background, ForeColor = Color.White, AutoScroll = false, Padding = new Padding(Px(24)) }; }
         TextBox Input(int x, int y, int width) { return new TextBox { Location = new Point(x,y), Size = new Size(width,32), BackColor = card, ForeColor = Color.White, BorderStyle = BorderStyle.FixedSingle }; }
         void Guard(Action action) { try { action(); } catch (Exception ex) { Error(ex); } }
         void Error(Exception ex) { Append("Ошибка: " + ex); problemNotice.ShowProblem(ex); }
@@ -134,6 +135,7 @@ namespace ZapretDesktop {
                 startWindows.Checked=runner.StartupEnabled;
                 telegram.Checked=runner.TelegramRunning;discord.Checked=runner.Running;
                 telegramRelay.Checked=TelegramRelay.Enabled(store.Current);
+                LoadBackendSettings();
             } finally { loading = false; RefreshState(); }
         }
         async Task PollStartup(){
@@ -209,9 +211,10 @@ namespace ZapretDesktop {
             relayChanging=false;busy=false;if(!IsDisposed)RefreshState();
         }
         async Task SetTelegram(){await SetService(false);}
-        async Task SetDiscord(){await SetService(true);}
+        async Task SetDiscord(){if(ProxyMode){await SetProxyEnabled(discord.Checked);return;}await SetService(true);}
         async Task SetService(bool discordMode) {
             if(loading)return;
+            cleanupFailure=null;
             var option=discordMode?discord:telegram;bool enabled=option.Checked,previous=discordMode?runner.Running:runner.TelegramRunning,previousFlag=discordMode?DiscordFilter.Enabled(store.Current):TelegramFilter.Enabled(store.Current),reconnect=runner.Running;
             bool serviceChange=discordChanging || telegramChanging;
             if((busy || starting) && !serviceChange || (discordMode?discordChanging:telegramChanging) || scanning || dnsBusy || appUpdates.Working || (discordMode && (runner.Conflict || domainEditor.Dirty))){loading=true;option.Checked=previous;loading=false;return;}
@@ -239,10 +242,12 @@ namespace ZapretDesktop {
                 }catch(Exception recovery){Error(recovery);}
             }
             }finally{
+            if(!runner.Running && !runner.TelegramRunning && runner.IdleReleased && store.Settings.StartWithWindows)Guard(()=>{store.Settings.StartWithWindows=false;StartupRegistration.Set(false,Application.ExecutablePath);store.Save();});
             loading=true;option.Checked=discordMode?runner.Running:runner.TelegramRunning;loading=false;
             if(discordMode)discordChanging=false;else telegramChanging=false;
             starting=busy=discordChanging || telegramChanging;serviceChanges.Release();if(!IsDisposed)RefreshState();
             }
+            if(!enabled && !runner.Running && !runner.TelegramRunning && !IsDisposed)await InspectFootprint();
         }
         async Task StopOtherBypass(){
             if(loading || busy || starting || scanning || testing || !runner.Conflict)return;
@@ -251,6 +256,7 @@ namespace ZapretDesktop {
             catch(Exception ex){Error(ex);}finally{busy=false;if(!IsDisposed)RefreshState();}
         }
         async Task ApplyStrategy() {
+            if(ProxyMode){await SetProxyEnabled(true);return;}
             if(busy || starting || scanning)return;
             problemNotice.Clear();
             starting=true;RefreshState();
@@ -264,19 +270,21 @@ namespace ZapretDesktop {
             }catch(Exception ex){if(!IsDisposed)Error(ex);}finally{starting=false;if(!IsDisposed)RefreshState();}
         }
         async Task StartEngine(string strategy,CancellationToken token) {
+            if(ProxyMode){token.ThrowIfCancellationRequested();await Task.Run(()=>runner.StartProxy(store.Root,store.Settings.ProxyStrategy,CurrentScope()));activeStrategy="ByeDPI · "+store.Settings.ProxyStrategy;return;}
             token.ThrowIfCancellationRequested();await Task.Delay(150,token);
             activeStrategy=strategy;await Task.Run(()=>{DiscordFilter.Set(store.Current,true);runner.Start(store.Current,strategy);});RefreshState();
             Exception startFailure=null;try{await EngineRunner.WaitForReady(()=>runner.Running,()=>runner.Ready,token,10000,()=>runner.DriverFailure);}catch(Exception ex){startFailure=ex;}
             if(startFailure!=null){await Task.Run(()=>runner.Stop());System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(startFailure).Throw();}
             if(!runner.Running)throw new IOException("Ядро завершилось после запуска. Подробности в журнале.");
         }
-        bool CheckEnabled(ServiceTarget target){return target.Kind==ProbeKind.Telegram?runner.TelegramRunning:target.Name.StartsWith("GitHub") || runner.Running;}
+        bool CheckEnabled(ServiceTarget target){return ConnectionTargets().Any(i=>Object.ReferenceEquals(ServiceChecks.Targets[i],target));}
         void InvalidateChecks(string reason) {checkEpoch++;dashboard.ClearResults(reason);}
         async Task StopChecks() {
             if(checkCancellation!=null)checkCancellation.Cancel();
             if(manualCheckTask!=null){try{await manualCheckTask;}catch(OperationCanceledException){}}
         }
         async Task AutoSelect(bool restoreConnection) {
+            if(ProxyMode){Error(new InvalidOperationException("В ByeDPI выберите вариант в списке и нажмите «Включить и проверить»."));return;}
             if(scanning || busy || starting || dnsBusy)return;
             problemNotice.Clear();
             if(runner.Conflict){Error(new InvalidOperationException("Завершите внешний winws перед автоподбором."));return;}
@@ -289,7 +297,7 @@ namespace ZapretDesktop {
             try {
                 await Task.Run(()=>{Strategy.ValidateEngine(store.Current);Trust.VerifyEngine(store.Current);});
                 InvalidateChecks("Автоподбор начинается…");await StopChecks();await Task.Run(()=>runner.Stop());
-                var tgSnapshot=runner.TelegramRunning?await ServiceChecks.TelegramProbe(token,12):null;
+                CheckResult tgSnapshot=null;
                 var result=await StrategySelector.Run(names,
                     async (name,cancel)=>{InvalidateChecks("Проверяется: "+name.Replace(".bat",""));await StartEngine(name,cancel);},
                     ()=>runner.Stop(),
@@ -317,6 +325,7 @@ namespace ZapretDesktop {
                     }catch(Exception ex){if(!IsDisposed)Append("Восстановление стратегии: "+ex.Message);}
                 }
                 scanning=false;scanCancellation.Dispose();scanCancellation=null;
+                if(stopAllAfterScan && !IsDisposed){stopAllAfterScan=false;await StopEverything();}
                 if(!IsDisposed){RefreshState();if(pendingExit)Exit();}
             }
         }
@@ -334,7 +343,7 @@ namespace ZapretDesktop {
             await StopChecks();await Task.Run(()=>runner.Stop());await AutoSelect(false);
         }
         async Task CheckUpdates(bool quiet) {
-            if (busy || scanning || checkingUpdates) return; checkingUpdates = true; RefreshState();
+            if (ProxyMode || busy || scanning || checkingUpdates) return; checkingUpdates = true; RefreshState();
             try {
                 coreManual.Tag=null;updateText.Text = "Проверяем обновления…"; release = await updater.Check(); if(IsDisposed)return;
                 if (!Updater.IsNewer(release.Version,Updater.Version(store.Current))) { updateText.Text = "Установлена последняя проверенная версия"; release = null; }
@@ -350,11 +359,11 @@ namespace ZapretDesktop {
         async Task RunChecksCore() {
             testing=true;checkCancellation=new CancellationTokenSource();var localCancellation=checkCancellation;var token=localCancellation.Token;
             int epoch=++checkEpoch;
-            var engineState=runner.Running?activeStrategy.Replace(".bat",""):(runner.TelegramRunning?"Telegram":runner.Conflict?"внешний winws":"сервисы выключены");
+            var engineState=ProxyMode?(runner.ProxyRunning?"ByeDPI · "+store.Settings.ProxyStrategy:"ByeDPI выключен · прямое соединение"):(runner.Running?"zapret · "+activeStrategy.Replace(".bat",""):runner.Conflict?"zapret выключен · обнаружен внешний winws":"zapret выключен · прямое соединение");
             dashboard.ClearResults("Проверяем: "+engineState+"…");RefreshState();
             try {
-                var results=await ServiceChecks.Batch(token,(index,item)=>{if(IsDisposed || epoch!=checkEpoch)return;dashboard.SetResult(index,item);Append(ServiceChecks.Targets[index].Name+": "+item.Detail+" · "+item.Milliseconds+" мс");},12);
-                if(!IsDisposed && epoch==checkEpoch){checkSummary.Text="Сетевых проб: "+results.Count(x=>!x.Informational && x.State==1)+" из "+results.Count(x=>!x.Informational && x.State!=3)+(runner.TelegramRunning?" · Telegram: "+(results.Any(x=>x.Informational && x.State==2)?"частично":results.Any(x=>x.Informational && x.State==1)?"доступен":"нет ответа"):!runner.Running && !runner.Conflict?" · обход выключен":results.All(x=>x.State==1 || x.State==3)?" · проверьте выбранные сервисы":"");if(results.Any(x=>x.Failure=="dns"))dashboard.ScanSummary.Text="Есть ошибка DNS Windows.\nНажмите «Диагностика DNS».";else if(results.Any(x=>x.State==1 && x.DnsRoute=="doh"))dashboard.ScanSummary.Text="YouTube доступен через DoH.\nВ браузере включите безопасный DNS.";}
+                var results=await ServiceChecks.Batch(token,(index,item)=>{if(IsDisposed || epoch!=checkEpoch)return;dashboard.SetResult(index,item);Append(ServiceChecks.Targets[index].Name+": "+item.Detail+" · "+item.Milliseconds+" мс");},12,CheckEnabled,null,runner.ProxyRunning?(Func<ServiceTarget,CancellationToken,int,Task<CheckResult>>)((target,cancel,seconds)=>ServiceChecks.RunProxy(target,cancel,runner.ProxyCheckPort,seconds)):null);
+                if(!IsDisposed && epoch==checkEpoch){dashboard.ResultContext=engineState;checkSummary.Text=engineState+"\nДоступно: "+results.Count(x=>!x.Informational && x.State==1)+" из "+results.Count(x=>!x.Informational && x.State!=3);if(results.Any(x=>x.Failure=="dns"))dashboard.ScanSummary.Text="Есть ошибка DNS Windows.\nНажмите «Диагностика DNS».";else if(results.Any(x=>x.State==1 && x.DnsRoute=="doh"))dashboard.ScanSummary.Text="YouTube доступен через DoH.\nВ браузере включите безопасный DNS.";}
             }catch(OperationCanceledException){}catch(Exception ex){if(!IsDisposed)Error(ex);}
             finally{testing=false;localCancellation.Dispose();if(checkCancellation==localCancellation)checkCancellation=null;if(!IsDisposed)RefreshState();}
         }
@@ -410,7 +419,7 @@ namespace ZapretDesktop {
             }finally{busy=false;if(!IsDisposed)RefreshState();}
         }
         void RefreshState() {
-            if (IsDisposed) return;
+            if (IsDisposed || Disposing || domainEditor==null || domainEditor.IsDisposed) return;
             bool on = runner.Running, external = !on && runner.Conflict;
             telegramRelay.Enabled=!busy && !starting && !scanning && !dnsBusy && !appUpdates.Working;
             if(!relayChanging){bool wasLoading=loading;loading=true;telegramRelay.Checked=TelegramRelay.Enabled(store.Current);loading=wasLoading;}
@@ -441,14 +450,16 @@ namespace ZapretDesktop {
             autoCheck.Enabled = !busy && !checkingUpdates && !store.Settings.AutoInstallCore;autoInstallCore.Enabled=!busy && !checkingUpdates; runChecks.Enabled = !busy && !starting && !scanning && !testing;
             appUpdateCard.Action.Enabled = !appUpdates.Working && !busy && !starting && !scanning && !dnsBusy && (appUpdates.Release==null || !domainEditor.Dirty);
             appUpdateCard.Render(appUpdates,appUpdates.Release!=null && domainEditor.Dirty && !appUpdates.Working?"Сохраните изменения в «Дополнительно», чтобы обновиться.":null);
-            updateNotice.Render(appUpdates.Release==null?null:appUpdates.Release.Version,release==null?null:release.Version,appUpdateCard.Action.Enabled,install.Enabled,on || external);
+            appUpdateCard.InstallVersion.Enabled=appUpdateCard.InstallVersion.Enabled && !busy && !starting && !scanning && !dnsBusy && !domainEditor.Dirty;
+            updateNotice.Render(appUpdates.Release==null || appUpdates.ManualVersion?null:appUpdates.Release.Version,ProxyMode || release==null?null:release.Version,appUpdateCard.Action.Enabled,install.Enabled,on || external);
             autoShell.Enabled = !appUpdates.Working && !busy && !store.Settings.AutoInstallShell;autoInstallShell.Enabled=!appUpdates.Working && !busy;coreManual.Visible=coreManual.Tag!=null;
             tray.Text = "ByPass — " + (on && runner.TelegramRunning?"оба обхода":on?"Discord и YouTube":runner.TelegramRunning?"Telegram":"выключен");
+            RefreshBackendControls();
         }
         void AppUpdateChanged() {
             if(IsDisposed || Disposing)return;
             if(InvokeRequired){try{BeginInvoke(new Action(AppUpdateChanged));}catch(InvalidOperationException){}return;}
-            appUpdateCard.Render(appUpdates);tabs.SetNotice(2,appUpdates.Release!=null);RefreshState();
+            appUpdateCard.Render(appUpdates);tabs.SetNotice(2,appUpdates.Release!=null && !appUpdates.ManualVersion);RefreshState();
         }
         async Task CheckShell(bool quiet) {
             if(busy || scanning || starting || appUpdates.Working)return;
@@ -457,26 +468,34 @@ namespace ZapretDesktop {
             if(appUpdates.State==AppUpdateState.Available)Append("Доступно обновление приложения "+appUpdates.Release.Version);
             if(!IsDisposed && appUpdates.State==AppUpdateState.Available && store.Settings.AutoInstallShell)await InstallShell(true);
         }
-        Task AppUpdateAction(){return InstallShell(false);}
+        Task AppUpdateAction(){return appUpdates.ManualVersion?CheckShell(false):InstallShell(false);}
+        async Task InstallSelectedShell(){
+            if(busy || starting || scanning || dnsBusy || appUpdates.Working || appUpdates.VersionsLoading || domainEditor.Dirty)return;
+            string version=appUpdateCard.Versions.SelectedItem as string;if(version==null)return;
+            if(await appUpdates.SelectVersion(version))await InstallShell(false);
+        }
         async Task InstallShell(bool automatic) {
             if(appUpdates.Release==null){await CheckShell(false);return;}
             if(busy || starting || scanning || dnsBusy || appUpdates.Working || domainEditor.Dirty)return;
             if(automatic && !store.Settings.AutoInstallShell)return;
-            if(!automatic && !confirmUpdate("Обновление ByPass","Обновить оболочку до версии "+appUpdates.Release.Version+"?\n\nПриложение перезапустится. Ваши настройки и списки сохранятся."))return;
+            if(automatic && appUpdates.ManualVersion)return;
+            bool downgrade=new Version(appUpdates.Release.Version)<new Version(ShellUpdates.Current);
+            if(!automatic && !confirmUpdate("Установка ByPass","Установить оболочку версии "+appUpdates.Release.Version+"?\n\n"+(downgrade?"Это откат: старые версии могут не поддерживать новые функции и настройки.\n":"")+(appUpdates.ManualVersion?"Обходы и автозапуск будут выключены. Автоустановка обновлений будет выключена.\n":"")+"Приложение перезапустится. Настройки сохранятся; для ручной установки создаётся их резервная копия."))return;
             await ApplyShell();
         }
         async Task ApplyShell() {
             if(busy || starting || scanning || dnsBusy || appUpdates.Working || domainEditor.Dirty)return;
-            busy=true;RefreshState();
+            busy=true;RefreshState();string runtimeBackup=null;
             try {
                 if(await appUpdates.Prepare(store.Root)) {
                     await StopChecks();
-                    bool reconnect=runner.Running && !runner.StartupEnabled;
+                    bool reconnect=runner.Running && !runner.StartupEnabled && !appUpdates.ManualVersion;
+                    if(appUpdates.ManualVersion){File.Copy(Path.Combine(store.Root,"data","settings.json"),Path.Combine(Path.GetDirectoryName(appUpdates.Prepared),"settings-before-install.json"),true);await Task.Run(()=>StopAllCore());store.Settings.AutoInstallShell=false;store.Save();runtimeBackup=ShellUpdates.PrepareRuntimeCompatibility(appUpdates.Prepared,store.Current);}
                     appUpdates.Installing();
                     await ShellUpdates.Launch(appUpdates.Prepared,Application.ExecutablePath,reconnect,!Visible);
                     if(!runner.StartupEnabled)runner.Stop();exiting=true;Close();
                 }
-            }catch(Exception ex){if(!IsDisposed){appUpdates.Fail("Не удалось установить обновление. Попробуйте ещё раз.");Append("Обновления приложения: "+ex.Message);}}
+            }catch(Exception ex){if(runtimeBackup!=null)ShellUpdates.RestoreRuntimeCompatibility(runtimeBackup,store.Current);if(!IsDisposed){appUpdates.Fail("Не удалось установить обновление. Попробуйте ещё раз.");Append("Обновления приложения: "+ex.Message);}}
             finally{busy=false;if(!IsDisposed){RefreshState();if(pendingExit)Exit();}}
         }
         void Open(string target) { Process.Start(new ProcessStartInfo(target) { UseShellExecute = true }); }
@@ -507,6 +526,7 @@ namespace ZapretDesktop {
         }
         protected override void Dispose(bool disposing) {
             if (disposing) {
+                CloseProxyBrowsers();
                 youtubeCancellation.Cancel();if(youtubeDns!=null)youtubeDns.Dispose();
                 if (checkCancellation != null) checkCancellation.Cancel();
                 if (scanCancellation != null) scanCancellation.Cancel();

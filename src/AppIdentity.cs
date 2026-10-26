@@ -32,6 +32,7 @@ namespace ZapretDesktop {
             if(current!=null && current!=Command(image))throw new InvalidOperationException("Запуск значка ByPass уже настроен из другой папки. Отключите его в той программе.");
             Write(enabled?Command(image):null);
         }
+        internal static bool RemoveOwned(string image){string current=Read();if(current==null)return true;if(current!=Command(image))return false;Write(null);return true;}
     }
     public static class AppShortcut {
         public static void Create() {

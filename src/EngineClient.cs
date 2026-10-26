@@ -13,6 +13,11 @@ namespace ZapretDesktop {
     public sealed class EngineRunner : IDisposable {
         NamedPipeServerStream pipe;Task reader;string helperHash;Timer observer;Process helper;
         readonly object gate=new object();readonly AutoResetEvent response=new AutoResetEvent(false);
+        readonly ProxyBypass proxy=new ProxyBypass();
+        internal bool ProxyRunning {get{return proxy.Running;}}
+        internal int ProxyPort {get{return proxy.Port;}}
+        internal int ProxyCheckPort {get{return proxy.CheckPort;}}
+        internal bool OwnsSession {get{return connected || running || proxy.HasResources || startup.Owned || telegramRunning;}}
         Dictionary<string,object> reply;volatile bool running,connected,ready,telegramRunning;Exception failure;volatile string driverFailure;
         internal bool TelegramRunning{get{return telegramRunning;}}
         internal bool IdleReleased {get;private set;}
@@ -22,9 +27,14 @@ namespace ZapretDesktop {
         internal bool StartupEnabled {get{return startup.Owned;}}
         internal string StartupStrategy {get{return startup.Strategy;}}
         internal string StartupEngine {get{return startup.Engine;}}
-        internal void RefreshStartup(){if(!Monitor.TryEnter(gate))return;try{startup=StartupService.Read(AppDomain.CurrentDomain.BaseDirectory);}finally{Monitor.Exit(gate);}}
-        public bool Running {get{return startup.Owned?startup.Running:running;}}
-        public bool Ready {get{return startup.Owned?startup.Running:running && ready;}} public string DriverFailure {get{return driverFailure;}}
+        internal void RefreshStartup(){if(!Monitor.TryEnter(gate))return;try{if(proxy.HasResources && !proxy.Running){proxy.Stop();IdleReleased=false;StopWarning="ByeDPI завершился неожиданно. Его локальные слушатели закрыты; повторите проверку остановки.";}startup=StartupService.Read(AppDomain.CurrentDomain.BaseDirectory);}finally{Monitor.Exit(gate);}}
+        public bool Running {get{return proxy.Running || (startup.Owned?startup.Running:running);}}
+        public bool Ready {get{return proxy.Running || (startup.Owned?startup.Running:running && ready);}} public string DriverFailure {get{return driverFailure;}}
+        internal void StartProxy(string root,string profile,ScopeOptions scope){lock(gate){
+            if(Running || telegramRunning || StartupEnabled)throw new InvalidOperationException("Сначала полностью выключите текущий обход и автозапуск.");
+            if(Conflict)throw new InvalidOperationException("Обнаружен внешний winws. Сначала остановите его.");
+            IdleReleased=false;StopWarning=null;proxy.Start(root,profile,scope,line=>{if(Log!=null)Log(line);});
+        }}
 #if TESTING
         internal Func<bool> ConflictCheck=null; internal Action<bool,string,string> TestStartupChange=null;
         internal Action<string,string> TestStart=null,TestSync=null;internal Action TestStop=null,TestStopExternal=null;
@@ -95,6 +105,7 @@ namespace ZapretDesktop {
         }
         public void Start(string engine,string strategy) {
             lock(gate) {
+            if(proxy.Running)throw new InvalidOperationException("Сначала выключите ByeDPI.");
             ready=false;driverFailure=null;IdleReleased=false;StopWarning=null;
             try {
                 Trust.VerifyEngine(engine);
@@ -107,7 +118,7 @@ namespace ZapretDesktop {
             try{Ask("start",Path.GetFileName(engine),strategy);}catch(IOException ex){throw new EngineSetupException("Не удалось связаться с компонентом запуска. Повторите запуск ByPass.\n"+ex.Message,ex);}
             }
         }
-        public void Stop(){lock(gate){ready=false;
+        public void Stop(){lock(gate){ready=false;try{proxy.Stop();}catch(Exception ex){IdleReleased=false;StopWarning=ex.Message;throw;}
 #if TESTING
             if(TestStop!=null){TestStop();running=false;return;}
 #endif
@@ -122,7 +133,8 @@ namespace ZapretDesktop {
                 if(TestRelease!=null){TestRelease();IdleReleased=true;return;}
                 if(TestStop!=null || TestTelegram!=null){IdleReleased=true;return;}
 #endif
-                Connect();bool closed=Ask("release-idle",null,null);
+                if(!connected && !StartupEnabled && NetworkFootprint.Read().Clean){IdleReleased=true;return;}
+                Connect();if(StartupEnabled)Ask("startup-disable",null,null);bool closed=Ask("release-idle",null,null);
                 if(!closed && !Running && !telegramRunning)throw new EngineStopException("Обходы выключены, но помощник не подтвердил полную остановку.");
                 IdleReleased=closed;
             }catch(Exception ex){StopWarning=ex.Message;throw new EngineStopException(ex.Message,ex);}
@@ -161,6 +173,7 @@ namespace ZapretDesktop {
             }
         }
         internal void SetTelegram(string engine,bool enabled){lock(gate){
+            if(enabled && proxy.Running)throw new InvalidOperationException("ByeDPI работает без драйвера. Для Telegram выберите режим zapret.");
             if(enabled){IdleReleased=false;StopWarning=null;}
 #if TESTING
             if(TestTelegram!=null){TestTelegram(engine,enabled);telegramRunning=enabled;return;}
@@ -173,6 +186,6 @@ namespace ZapretDesktop {
             if(TestStopExternal!=null){TestStopExternal();return;}
 #endif
             Connect();Ask("stop-external",null,null);}}
-        public void Dispose(){if(observer!=null)observer.Dispose();lock(gate){try{if(connected)Ask("shutdown",null,null);}catch{}connected=false;if(pipe!=null)pipe.Dispose();if(reader!=null)try{reader.Wait(2000);}catch{}if(helper!=null)helper.Dispose();}response.Dispose();}
+        public void Dispose(){proxy.Dispose();if(observer!=null)observer.Dispose();lock(gate){try{if(connected)Ask("shutdown",null,null);}catch{}connected=false;if(pipe!=null)pipe.Dispose();if(reader!=null)try{reader.Wait(2000);}catch{}if(helper!=null)helper.Dispose();}response.Dispose();}
     }
 }

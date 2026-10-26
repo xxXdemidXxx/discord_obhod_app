@@ -53,17 +53,19 @@ namespace ZapretDesktop {
         public readonly List<object> Items=new List<object>();int selected=-1;bool hover;ToolStripDropDown popup;
         public event EventHandler SelectedIndexChanged;
         public Func<object,string> Format;
+        string emptyText="Выберите вариант";public string EmptyText{get{return emptyText;}set{if(emptyText==value)return;emptyText=value;Invalidate();}}
         public int SelectedIndex{get{return selected;}set{int next=value>=0 && value<Items.Count?value:-1;bool change=next!=selected;selected=next;Invalidate();if(change && SelectedIndexChanged!=null)SelectedIndexChanged(this,EventArgs.Empty);}}
         public object SelectedItem{get{return selected>=0 && selected<Items.Count?Items[selected]:null;}set{SelectedIndex=Items.IndexOf(value);}}
         public DarkSelect(){DoubleBuffered=true;TabStop=true;Size=new Size(250,40);BackColor=Theme.Input;ForeColor=Theme.Text;Font=new Font("Segoe UI",10);Cursor=Cursors.Hand;}
         internal string Display(object value){return Format==null?Convert.ToString(value).Replace(".bat",""):Format(value);}
-        protected override void OnPaint(PaintEventArgs e){e.Graphics.SmoothingMode=SmoothingMode.AntiAlias;using(var p=Theme.Round(new Rectangle(0,0,Width-1,Height-1),5))using(var b=new SolidBrush(BackColor))using(var pen=new Pen(Focused?Theme.Accent:hover?Color.FromArgb(92,95,102):Theme.Border)){e.Graphics.FillPath(b,p);e.Graphics.DrawPath(pen,p);}TextRenderer.DrawText(e.Graphics,SelectedItem==null?"Выберите вариант":Display(SelectedItem),Font,new Rectangle(12,0,Width-42,Height),Enabled?ForeColor:Theme.Muted,TextFormatFlags.VerticalCenter|TextFormatFlags.EndEllipsis);using(var pen=new Pen(Theme.Muted,2)){int x=Width-22,y=Height/2-2;e.Graphics.DrawLines(pen,new[]{new Point(x-4,y),new Point(x,y+4),new Point(x+4,y)});}}
+        protected override void OnPaint(PaintEventArgs e){e.Graphics.SmoothingMode=SmoothingMode.AntiAlias;using(var p=Theme.Round(new Rectangle(0,0,Width-1,Height-1),5))using(var b=new SolidBrush(BackColor))using(var pen=new Pen(Focused?Theme.Accent:hover?Color.FromArgb(92,95,102):Theme.Border)){e.Graphics.FillPath(b,p);e.Graphics.DrawPath(pen,p);}TextRenderer.DrawText(e.Graphics,SelectedItem==null?EmptyText:Display(SelectedItem),Font,new Rectangle(12,0,Width-42,Height),Enabled?ForeColor:Theme.Muted,TextFormatFlags.VerticalCenter|TextFormatFlags.EndEllipsis);using(var pen=new Pen(Theme.Muted,2)){int x=Width-22,y=Height/2-2;e.Graphics.DrawLines(pen,new[]{new Point(x-4,y),new Point(x,y+4),new Point(x+4,y)});}}
         protected override void OnMouseEnter(EventArgs e){hover=true;Invalidate();base.OnMouseEnter(e);}
         protected override void OnMouseLeave(EventArgs e){hover=false;Invalidate();base.OnMouseLeave(e);}
         protected override void OnGotFocus(EventArgs e){Invalidate();base.OnGotFocus(e);}
         protected override void OnLostFocus(EventArgs e){Invalidate();base.OnLostFocus(e);}
         protected override void OnClick(EventArgs e){base.OnClick(e);Open();}
         void Open(){if(!Enabled || Items.Count==0)return;if(popup!=null){ClosePopup();return;}Focus();var list=new SelectList(this);var host=new ToolStripControlHost(list){Margin=Padding.Empty,Padding=Padding.Empty,AutoSize=false,Size=list.Size};popup=new ToolStripDropDown{Padding=new Padding(1),BackColor=Theme.Border,AutoSize=true};popup.Items.Add(host);popup.Closed+=(s,e)=>{var old=(ToolStripDropDown)s;popup=null;Invalidate();if(IsHandleCreated && !Disposing && !IsDisposed)BeginInvoke(new Action(()=>old.Dispose()));};popup.Show(this,new Point(0,Height+4));list.Focus();}
+        internal void ShowChoices(){if(popup==null)Open();}
         void ClosePopup(){var old=popup;if(old!=null){old.Close();old.Dispose();}}
         internal void Choose(int index){SelectedIndex=index;ClosePopup();Focus();}
         protected override bool IsInputKey(Keys key){return key==Keys.Up || key==Keys.Down || base.IsInputKey(key);}

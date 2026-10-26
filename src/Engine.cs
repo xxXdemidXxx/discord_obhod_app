@@ -33,6 +33,9 @@ namespace ZapretDesktop {
         public bool AutoInstallShell = false;
         public bool AutoInstallCore = false; public bool StartWithWindows = false;
         public string VisualTheme = "graphite";
+        public string Backend="zapret", ProxyStrategy="split";
+        public bool StrictScope=true, ScopeYouTube=true, ScopeDiscord=true, ScopeVoice=false;
+        public bool ProxyScopeYouTube=true,ProxyScopeDiscord=true;
     }
 
     public sealed class Store {
@@ -119,6 +122,7 @@ namespace ZapretDesktop {
             if (tokens.Count == 0 || tokens.Any(x => !x.StartsWith("--", StringComparison.Ordinal)))
                 throw new InvalidDataException("Неподдерживаемый формат параметров стратегии.");
             if (!DiscordFilter.Enabled(engine)) DiscordFilter.Apply(tokens);
+            ServiceScope.Apply(tokens,ServiceScope.Read(engine));
             // The base strategy always leaves MTProto/WSS untouched. Telegram
             // can then start/stop without restarting or rewriting this process.
             if(telegramPassthrough)TelegramFilter.Apply(tokens);

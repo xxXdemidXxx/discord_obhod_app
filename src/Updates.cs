@@ -78,10 +78,10 @@ namespace ZapretDesktop {
             var ipset = Path.Combine(oldEngine, "lists", "ipset-all.txt");
             var isCustom = !File.Exists(manifest) || Hash(ipset) != File.ReadAllText(manifest).Trim();
             if (isCustom) File.Copy(ipset, Path.Combine(newEngine, "lists", "ipset-all.txt"), true);
-            foreach (var relative in new[] { "lists/ipset-all.txt.backup", "utils/game_filter.enabled", TelegramFilter.RelativePath, TelegramRelay.RelativePath, DiscordFilter.RelativePath, "bin/ACTIVE_GAME_UDP.bin", "bin/ACTIVE_DISCORD_UDP.bin" }) {
+            foreach (var relative in new[] { "lists/ipset-all.txt.backup", "utils/game_filter.enabled", ServiceScope.RelativePath, TelegramFilter.RelativePath, TelegramRelay.RelativePath, DiscordFilter.RelativePath, "bin/ACTIVE_GAME_UDP.bin", "bin/ACTIVE_DISCORD_UDP.bin" }) {
                 var source = Path.Combine(oldEngine, relative); var target = Path.Combine(newEngine, relative);
                 if (File.Exists(source)) { Directory.CreateDirectory(Path.GetDirectoryName(target)); File.Copy(source, target, true); }
-                else if ((relative == "utils/game_filter.enabled" || relative == TelegramFilter.RelativePath || relative == TelegramRelay.RelativePath || relative == DiscordFilter.RelativePath) && File.Exists(target)) File.Delete(target);
+                else if ((relative == "utils/game_filter.enabled" || relative==ServiceScope.RelativePath || relative == TelegramFilter.RelativePath || relative == TelegramRelay.RelativePath || relative == DiscordFilter.RelativePath) && File.Exists(target)) File.Delete(target);
             }
         }
         public static string Hash(string path) {

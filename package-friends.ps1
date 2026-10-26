@@ -1,6 +1,7 @@
 param([switch]$OwnerSignature)
 $ErrorActionPreference = 'Stop'
 & (Join-Path $PSScriptRoot 'fetch-engine.ps1') -Version 1.10.4
+& (Join-Path $PSScriptRoot 'fetch-alternatives.ps1')
 $version = ([version]([regex]::Match((Get-Content -LiteralPath "$PSScriptRoot\src\Version.cs" -Raw), 'Value = "([0-9.]+)"').Groups[1].Value)).ToString(3)
 & (Join-Path $PSScriptRoot 'build.ps1')
 $archive = Join-Path $PSScriptRoot 'downloads\zapret-discord-youtube-1.10.4.zip'
@@ -27,6 +28,10 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'LICENSE') -Destination $appDir
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'licenses') -Destination (Join-Path $appDir 'licenses') -Recurse
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'TESTING-GUIDE.txt') -Destination (Join-Path $appDir 'GUIDE.txt')
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'docs\DRIVER-SHUTDOWN.md') -Destination (Join-Path $appDir 'DRIVER-SHUTDOWN.txt')
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'docs\ENGINES.md') -Destination (Join-Path $appDir 'ENGINES.txt')
+$alternative=Join-Path $appDir 'data/alternatives/byedpi-0.17.3'
+New-Item -ItemType Directory -Path $alternative -Force | Out-Null
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'downloads/alternatives/byedpi-0.17.3/ciadpi.exe') -Destination $alternative
 $unpacked = Join-Path $stage 'official'
 Expand-Archive -LiteralPath $archive -DestinationPath $unpacked
 $engine = Join-Path $appDir 'data\engines\1.10.4'

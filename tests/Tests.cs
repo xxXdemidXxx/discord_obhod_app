@@ -10,7 +10,7 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace ZapretDesktop {
-    static class Tests {
+    static partial class Tests {
         static int count;
         static string Sign(string payload) {
             using(var key=new System.Security.Cryptography.RSACryptoServiceProvider()) {
@@ -48,7 +48,8 @@ namespace ZapretDesktop {
                     var toggle=AllControls(form).OfType<ToggleOption>().Single(x=>x.Name=="TelegramMessages");
                     Action<ToggleOption,bool> change=(control,value)=>{SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());control.Checked=value;};
                     Action wait=()=>{var watch=Stopwatch.StartNew();while((bool)typeof(MainForm).GetField("starting",flags).GetValue(form) && watch.ElapsedMilliseconds<10000){Application.DoEvents();Thread.Sleep(10);}Assert(!(bool)typeof(MainForm).GetField("starting",flags).GetValue(form),"Telegram change finishes asynchronously");};
-                    foreach(var size in new[]{new Size(1100,830),new Size(940,690)}){form.ClientSize=new Size((int)(size.Width*Theme.SystemScale),(int)(size.Height*Theme.SystemScale));Application.DoEvents();Assert(toggle.Visible && toggle.Parent.ClientRectangle.Contains(toggle.Bounds),"Telegram switch fits window "+size);Capture(form,Path.Combine(root,"tests","window-telegram-off-"+size.Width+".png"));}
+                    var telegramTabs=(DarkTabs)typeof(MainForm).GetField("tabs",flags).GetValue(form);telegramTabs.SelectedIndex=6;
+                    foreach(var size in new[]{new Size(1100,830),new Size(940,690)}){form.ClientSize=new Size((int)(size.Width*Theme.SystemScale),(int)(size.Height*Theme.SystemScale));Application.DoEvents();Assert(toggle.Visible && toggle.Parent.ClientRectangle.Contains(toggle.Bounds),"Telegram switch fits its separate page "+size);Capture(form,Path.Combine(root,"tests","window-telegram-off-"+size.Width+".png"));}telegramTabs.SelectedIndex=0;
                     form.ClientSize=new Size((int)(1100*Theme.SystemScale),(int)(830*Theme.SystemScale));SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());toggle.Checked=true;wait();
                     Assert(!runner.Running && runner.TelegramRunning && toggle.Checked && starts==0,"Telegram starts independently with the main engine off");Capture(form,Path.Combine(root,"tests","window-telegram-only.png"));
                     SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());toggle.Checked=false;wait();Assert(!runner.Running && !runner.TelegramRunning && starts==0,"Telegram off does not start or stop the main engine");
@@ -104,8 +105,8 @@ namespace ZapretDesktop {
                         ServiceChecks.TestRun=(probeTarget,token)=>{probed.Add(probeTarget.Name);return Task.FromResult(new CheckResult{State=1,Informational=probeTarget.Kind==ProbeKind.Telegram,AvailableEndpoints=5,TotalEndpoints=5,Detail="Тестовая сетевая проба без включения обхода",Milliseconds=1});};
                         try{
                             SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());var manual=(Task)typeof(MainForm).GetMethod("RunChecks",flags).Invoke(form,null);Pump(manual);
-                            Assert(probed.Count==ServiceChecks.Targets.Length && !runner.Running && !runner.TelegramRunning && starts==startedBeforeProbe && tgStarts==tgBeforeProbe,"Manual service check probes all seven services with both bypasses off and does not enable them");
-                            Assert(dashboard.Statuses.All(x=>x.Text!="Выключен"),"Manual check renders actual probe results instead of skipped rows");Capture(form,Path.Combine(root,"tests","window-services-probed-off.png"));
+                            Assert(probed.Count==5 && !runner.Running && !runner.TelegramRunning && starts==startedBeforeProbe && tgStarts==tgBeforeProbe,"Manual check probes only five selected engine targets without enabling a bypass");
+                            Assert(dashboard.Statuses.Take(5).All(x=>x.Text!="Выключен"),"Manual check renders selected engine probe results");Capture(form,Path.Combine(root,"tests","window-services-probed-off.png"));
                         }finally{ServiceChecks.TestRun=null;}
                         change(toggle,true);wait();
                     }
@@ -116,7 +117,7 @@ namespace ZapretDesktop {
                     int baseBeforeRelay=starts,tgBeforeRelay=tgStarts;SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());relayOption.Checked=true;
                     var relayWatch=Stopwatch.StartNew();while((bool)typeof(MainForm).GetField("busy",flags).GetValue(form) && relayWatch.ElapsedMilliseconds<5000){Application.DoEvents();Thread.Sleep(10);}
                     Assert(relayOption.Checked && TelegramRelay.Enabled(store.Current) && runner.TelegramRunning && tgStarts==tgBeforeRelay+1 && starts==baseBeforeRelay,"Relay choice reconnects only Telegram and preserves base bypass state");
-                    var settingsPage=tabs.TabPages[1];settingsPage.ScrollControlIntoView(relayOption.Parent);Application.DoEvents();Capture(form,Path.Combine(root,"tests","window-telegram-media-settings.png"));
+                    tabs.SelectedIndex=6;var settingsPage=tabs.TabPages[6];settingsPage.ScrollControlIntoView(relayOption.Parent);Application.DoEvents();Capture(form,Path.Combine(root,"tests","window-telegram-media-settings.png"));tabs.SelectedIndex=1;tabs.TabPages[1].ScrollControlIntoView(other.Parent);
                     runner.TestStopExternal=()=>{external=false;};SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());other.PerformClick();
                     var stopWatch=Stopwatch.StartNew();while((bool)typeof(MainForm).GetField("busy",flags).GetValue(form) && stopWatch.ElapsedMilliseconds<5000){Application.DoEvents();Thread.Sleep(10);}Assert(!external && !other.Enabled && toggle.Enabled && runner.TelegramRunning,"Stopping external bypass leaves Telegram alive");
                     runner.ConflictCheck=()=>false;typeof(MainForm).GetMethod("Exit",flags).Invoke(form,null);
@@ -540,6 +541,8 @@ namespace ZapretDesktop {
                 var root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".."));
                 var local = Path.GetFullPath(Path.Combine(root, "..", "zapret-discord-youtube-1.10.2"));
                 var official = Path.Combine(root, "downloads", "official-1.10.3", "zapret-discord-youtube-1.10.3");
+                NetworkFootprint.TestRead=()=>new NetworkFootprint();
+                if(args.Contains("--engines-only")){Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);HeaderLayoutTests(root,official);ScopeTests(root,official);ScopeTests(root,Path.Combine(root,"downloads","official-1.10.4","zapret-discord-youtube-1.10.4"));WorkspaceTests(root,official,args.Contains("--proxy-native"));ShellVersionTests().GetAwaiter().GetResult();Console.WriteLine("PASS: "+count+" engine/version checks");return 0;}
                 if(args.Contains("--shutdown-only")){DriverShutdownTests(root);Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);TelegramTests(root,official);Console.WriteLine("PASS: "+count+" shutdown checks");return 0;}
                 if(args.Contains("--telegram-only")){Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);TelegramTests(root,official);TelegramTransportTests(root,official);Console.WriteLine("PASS: "+count+" Telegram checks");return 0;}
                 if(args.Contains("--core-updates-only")){
@@ -616,7 +619,7 @@ namespace ZapretDesktop {
                     }
                     if (args.Contains("--network")) Network(store).GetAwaiter().GetResult();
                     store.Settings.CheckUpdates = false; store.Settings.AutoAppUpdates=false; store.Save();
-                    Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);TelegramTests(root,official);TelegramTransportTests(root,official);
+                    Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);HeaderLayoutTests(root,official);ScopeTests(root,official);ScopeTests(root,Path.Combine(root,"downloads","official-1.10.4","zapret-discord-youtube-1.10.4"));WorkspaceTests(root,official,false);ShellVersionTests().GetAwaiter().GetResult();TelegramTests(root,official);TelegramTransportTests(root,official);
                     using (var form = new MainForm(store, false)) {
                         form.StartPosition = FormStartPosition.Manual; form.Location = new Point(-2500, -2500); form.Show(); Application.DoEvents(); form.PerformLayout(); NativeFrameChecks(form,root);
                         if (args.Contains("--network")) {
@@ -854,7 +857,7 @@ namespace ZapretDesktop {
             using(var form=new MainForm(store,false,false,false,false,new ShellUpdates(http),(title,message)=>{confirmations++;return accept;})){
                 form.StartPosition=FormStartPosition.Manual;form.Location=new Point(-2500,-2500);form.Show();Application.DoEvents();SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());var tabs=FindTabs(form);tabs.SelectedIndex=2;
                 var card=AllControls(form).OfType<AppUpdateCard>().Single();
-                Assert(card.Action.Text=="Проверить обновления" && card.Action.Enabled && AllControls(card).OfType<Button>().Count(x=>x.Visible)==1,"Updates view starts with exactly one visible action");
+                Assert(card.Action.Text=="Проверить обновления" && card.Action.Enabled && card.ReloadVersions.Enabled && !card.InstallVersion.Enabled && !card.Cancel.Visible,"Latest update and manual version picker have separate explicit actions");
                 Capture(form,Path.Combine(root,"tests","window-updates-idle.png"));
                 Pump(UpdateClick(form));Assert(card.Action.Text=="Обновить" && http.Calls==1,"Native update button changes to install without downloading");
                 Assert(form.Text.StartsWith("ByPass") && AllControls(form).OfType<UpdateNotice>().Single().Visible && confirmations==0,"ByPass shows a quiet update notice without an automatic confirmation dialog");
@@ -888,6 +891,11 @@ namespace ZapretDesktop {
                 Capture(form,Path.Combine(root,"tests","window-updates-components.png"));
                 http.Reply=url=>Response(200,Feed(ShellUpdates.Current));var session=(AppUpdateSession)typeof(MainForm).GetField("appUpdates",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).GetValue(form);Pump(session.Check());
                 Capture(form,Path.Combine(root,"tests","window-updates-current.png"));
+                http.Reply=url=>url.Contains("releases?")?Response(200,"["+RawFeed("0.6.3")+","+RawFeed("0.6.2")+"]"):Response(200,url.EndsWith("build-proof.json")?OwnerManifest(url.Contains("v0.6.3/")?"0.6.3":"0.6.2"):Feed(url.Contains("v0.6.3/")?"0.6.3":"0.6.2"));
+                Pump(session.LoadVersions());card.Versions.SelectedItem="0.6.2";Assert(card.InstallVersion.Enabled,"A published older version can be selected in the actual app card");
+                accept=false;int previousConfirmations=confirmations;Pump((Task)typeof(MainForm).GetMethod("InstallSelectedShell",flags).Invoke(form,null));Assert(confirmations==previousConfirmations+1 && session.Release.Version=="0.6.2" && !session.Working,"Declining explicit downgrade makes no install and retains selected verified release");
+                foreach(var size in new[]{new Size(940,690),new Size(1100,830)}){form.ClientSize=new Size((int)(size.Width*Theme.SystemScale),(int)(size.Height*Theme.SystemScale));Application.DoEvents();Assert(card.ClientRectangle.Contains(card.Versions.Bounds) && card.ClientRectangle.Contains(card.InstallVersion.Bounds) && !card.Versions.Bounds.IntersectsWith(card.Action.Bounds),"Version controls fit without overlapping latest update action: "+size);Capture(form,Path.Combine(root,"tests","window-updates-version-choice-"+size.Width+".png"));}
+                http.Reply=url=>Response(200,"[]");Pump(session.LoadVersions());Assert(card.Versions.Items.Count==0 && !card.InstallVersion.Visible && session.Release==null && !session.ManualVersion && session.Message.Length==0,"Actual application clears an unavailable selection and hides its installation action");Capture(form,Path.Combine(root,"tests","window-updates-no-installable-versions.png"));
             }
         }
         static void AppUpdateOutcomeUiTests(Store store){

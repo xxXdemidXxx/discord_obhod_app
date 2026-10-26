@@ -18,6 +18,14 @@ namespace ZapretDesktop {
                 throw new InvalidDataException("Сборка не подтверждена ключом автора ByPass.");
             Trust.VerifyShell(proof,exe,config);
         }
+        internal static void VerifyRelease(string proof,string releaseProof,string version){
+            try{
+            var data=Trust.Verify(proof);var release=Trust.Verify(releaseProof);
+            if(Convert.ToInt32(data["schema"])!=1 || Convert.ToString(data["kind"])!="ByPass-build" || Convert.ToString(data["owner"])!=Owner || Convert.ToString(data["version"])!=version)throw new InvalidDataException("Нет подтверждения сборки выбранной версии.");
+            var signed=(System.Collections.Generic.Dictionary<string,object>)data["shell_files"];var expected=(System.Collections.Generic.Dictionary<string,object>)release["shell_files"];
+            foreach(string name in new[]{"exe","config"})if(Convert.ToString(signed[name])!=Convert.ToString(expected[name]))throw new InvalidDataException("Данные сборки и установочного пакета не совпадают.");
+            }catch(Exception ex){throw new InvalidDataException("Данные установки этой версии не подтверждены.",ex);}
+        }
         public static bool Current(string exe) {
             try {string path=Path.Combine(Path.GetDirectoryName(exe),ProofName);Trust.NoLinks(path);if(new FileInfo(path).Length>1024*1024)return false;Verify(File.ReadAllText(path),exe,exe+".config",ShellUpdates.Current);return true;}catch{return false;}
         }

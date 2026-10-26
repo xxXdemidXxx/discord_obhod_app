@@ -149,7 +149,7 @@ namespace ZapretDesktop {
                                         DriverServiceRecovery.Repair(line=>HostWire.Write(pipe,new{type="log",text=line}));
                                         telegram=StartTelegram(tgSnapshot,line=>HostWire.Write(pipe,new{type="log",text=line}));preparing=false;break;
                                     case "telegram-stop":if(telegram!=null){telegram.Dispose();telegram=null;}break;
-                                    case "startup-disable":runner.Stop();StartupService.Remove(installation);break;
+                                    case "startup-disable":runner.Stop();var removingStartup=StartupService.Read(installation);if(removingStartup.Owned)lastEngine=removingStartup.Snapshot;StartupService.Remove(installation);break;
                                     case "stop-external":runner.Stop();ExternalBypass.Stop(line=>HostWire.Write(pipe,new{type="log",text=line}));break;
                                     case "stop":runner.Stop();if(StartupService.Read(installation).Owned)StartupService.Stop(installation);break;
                                     case "status":break;
