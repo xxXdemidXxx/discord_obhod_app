@@ -23,27 +23,29 @@ namespace ZapretDesktop {
             return path.StartsWith(prefix,StringComparison.OrdinalIgnoreCase) &&
                 System.Text.RegularExpressions.Regex.IsMatch(path.Substring(prefix.Length),@"^(runtime|startup)-[0-9a-f]{32}\\bin\\WinDivert(32|64)\.sys$",System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         }
-        internal static bool Release(Func<DriverRegistration> read,Action stop,Action delete,Func<bool> consumers,string root) {
+        internal static bool Release(Func<DriverRegistration> read,Action stop,Action delete,Func<bool> consumers,string root,bool external=false) {
             var first=read();if(first==null)return true;
-            Validate(first,root);
+            Validate(first,root,external);
             string originalPath=first.Path;
             if(first.State!=1 && consumers())throw new EngineStopException("Обходы остановлены. WinDivert используется другой программой; драйвер оставлен работающим.");
             var current=read();if(current==null)return true;
-            Validate(current,root);
+            Validate(current,root,external);
             if(!String.Equals(originalPath,current.Path,StringComparison.OrdinalIgnoreCase))throw new EngineStopException("Обходы остановлены. Регистрация WinDivert изменилась; выгрузка отменена.");
             if(current.State!=1){if(consumers())throw new EngineStopException("Обходы остановлены. WinDivert ещё используется; закройте другие программы обхода.");stop();}
             current=read();if(current==null)return true;
-            Validate(current,root);
+            Validate(current,root,external);
             if(current.State!=1 || !String.Equals(originalPath,current.Path,StringComparison.OrdinalIgnoreCase))throw new EngineStopException("Обходы остановлены, но Windows не подтвердила выгрузку WinDivert. Подробности — в журнале.");
             delete();
             if(read()!=null)throw new EngineStopException("WinDivert остановлен, но Windows ещё не удалила его службу. Закройте окно служб; при необходимости перезагрузите компьютер.");
             return true;
         }
-        static void Validate(DriverRegistration value,string root) {
-            if(value.Type!=1 || value.Start!=3 || !OwnedPath(root,value.Path))throw new EngineStopException("Обходы остановлены. WinDivert принадлежит другой программе или его параметры изменены; служба оставлена без изменений.");
+        static void Validate(DriverRegistration value,string root,bool external) {
+            string path=EngineHost.NormalizeDriverPath(value.Path);
+            bool known=external && path.Length>3 && Char.IsLetter(path[0]) && path[1]==':' && path[2]=='\\' && (String.Equals(Path.GetFileName(path),"WinDivert64.sys",StringComparison.OrdinalIgnoreCase) || String.Equals(Path.GetFileName(path),"WinDivert32.sys",StringComparison.OrdinalIgnoreCase));
+            if(value.Type!=1 || (value.Start!=3 && value.Start!=4) || (!known && !OwnedPath(root,value.Path)))throw new EngineStopException("Обходы остановлены. WinDivert принадлежит другой программе или его параметры изменены; служба оставлена без изменений.");
             Trust.NoLinks(EngineHost.NormalizeDriverPath(value.Path));
         }
-        internal static void Unload(string engine,Action<string> log) {
+        internal static void Unload(string engine,Action<string> log,bool external=false) {
             bool locked=false;
             using(var mutex=new Mutex(false,"WinDivertDriverInstallMutex")) {
                 try {
@@ -56,7 +58,7 @@ namespace ZapretDesktop {
                     }
                     foreach(string name in names) {
                         if(!String.Equals(name,"WinDivert",StringComparison.OrdinalIgnoreCase))throw new EngineStopException("Обходы остановлены. Найдена другая версия драйвера "+name+"; её служба оставлена без изменений.");
-                        using(var service=new NativeDriver(name))Release(service.Read,service.Stop,service.Delete,()=>HasConsumers(engine),HostWire.ProtectedRoot);
+                        using(var service=new NativeDriver(name))Release(service.Read,service.Stop,service.Delete,()=>HasConsumers(engine),HostWire.ProtectedRoot,external);
                     }
                     if(log!=null)log("Обходы остановлены · WinDivert выгружен · служба драйвера удалена.");
                 }catch(EngineStopException){throw;}

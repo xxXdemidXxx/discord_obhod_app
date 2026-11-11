@@ -542,6 +542,7 @@ namespace ZapretDesktop {
                 var local = Path.GetFullPath(Path.Combine(root, "..", "zapret-discord-youtube-1.10.2"));
                 var official = Path.Combine(root, "downloads", "official-1.10.3", "zapret-discord-youtube-1.10.3");
                 NetworkFootprint.TestRead=()=>new NetworkFootprint();
+                if(args.Contains("--repair-only")){DriverRecoveryTests(root);DriverShutdownTests(root);SelectionTests().GetAwaiter().GetResult();FootprintRepairTests();Console.WriteLine("PASS: "+count+" repair checks");return 0;}
                 if(args.Contains("--engines-only")){Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);HeaderLayoutTests(root,official);ScopeTests(root,official);ScopeTests(root,Path.Combine(root,"downloads","official-1.10.4","zapret-discord-youtube-1.10.4"));WorkspaceTests(root,official,args.Contains("--proxy-native"));ShellVersionTests().GetAwaiter().GetResult();Console.WriteLine("PASS: "+count+" engine/version checks");return 0;}
                 if(args.Contains("--shutdown-only")){DriverShutdownTests(root);Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);TelegramTests(root,official);Console.WriteLine("PASS: "+count+" shutdown checks");return 0;}
                 if(args.Contains("--telegram-only")){Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);TelegramTests(root,official);TelegramTransportTests(root,official);Console.WriteLine("PASS: "+count+" Telegram checks");return 0;}
@@ -556,7 +557,7 @@ namespace ZapretDesktop {
                         Console.WriteLine(target.Name+": state="+result.State+", route="+result.DnsRoute+", "+result.Detail);if(result.State!=1)return 1;
                     }return 0;
                 }
-                local=official;YouTubeDnsFallbackTests(root).GetAwaiter().GetResult();YouTubeDnsTests(root).GetAwaiter().GetResult();StartupTests(root,official);SecurityTests(root,official);LegacyMigrationTest(root); DriverRecoveryTests(root); DriverShutdownTests(root); FeedbackAndDriverTests(root,official).GetAwaiter().GetResult(); SelectionTests().GetAwaiter().GetResult(); ServiceProbeTests().GetAwaiter().GetResult(); DomainTests(root); UpdateFeedTests().GetAwaiter().GetResult(); CoreUpdateTests(root,official).GetAwaiter().GetResult(); AppUpdateSessionTests(root).GetAwaiter().GetResult(); StageTests(root).GetAwaiter().GetResult(); ShellReplacementTest(root); ShellRollbackTest(root); ShellHandshakeTest(root);
+                local=official;FootprintRepairTests();YouTubeDnsFallbackTests(root).GetAwaiter().GetResult();YouTubeDnsTests(root).GetAwaiter().GetResult();StartupTests(root,official);SecurityTests(root,official);LegacyMigrationTest(root); DriverRecoveryTests(root); DriverShutdownTests(root); FeedbackAndDriverTests(root,official).GetAwaiter().GetResult(); SelectionTests().GetAwaiter().GetResult(); ServiceProbeTests().GetAwaiter().GetResult(); DomainTests(root); UpdateFeedTests().GetAwaiter().GetResult(); CoreUpdateTests(root,official).GetAwaiter().GetResult(); AppUpdateSessionTests(root).GetAwaiter().GetResult(); StageTests(root).GetAwaiter().GetResult(); ShellReplacementTest(root); ShellRollbackTest(root); ShellHandshakeTest(root);
                 foreach (var engine in new[] {local, official}.Distinct()) {
                     Strategy.ValidateEngine(engine);
                     var profiles = Directory.GetFiles(engine, "general*.bat"); Assert(profiles.Length == 22, "22 upstream profiles expected");
@@ -1244,7 +1245,14 @@ namespace ZapretDesktop {
             }
             Assert(DriverShutdown.OwnedPath(folder,owned) && DriverShutdown.OwnedPath(folder,owned.Replace("runtime-","startup-")),"Protected runtime and startup driver paths are recognized");
             foreach(uint type in new uint[]{0,2,16}){value=fresh();value.Type=type;stops=deletes=0;bool refused=false;try{DriverShutdown.Release(()=>value,stop,delete,empty,folder);}catch(EngineStopException){refused=true;}Assert(refused && stops==0 && deletes==0,"Non-kernel service is never stopped: "+type);}
-            foreach(uint start in new uint[]{0,1,2,4}){value=fresh();value.Start=start;stops=deletes=0;bool refused=false;try{DriverShutdown.Release(()=>value,stop,delete,empty,folder);}catch(EngineStopException){refused=true;}Assert(refused && stops==0 && deletes==0,"Unexpected driver start type is preserved: "+start);}
+            foreach(uint start in new uint[]{0,1,2}){value=fresh();value.Start=start;stops=deletes=0;bool refused=false;try{DriverShutdown.Release(()=>value,stop,delete,empty,folder);}catch(EngineStopException){refused=true;}Assert(refused && stops==0 && deletes==0,"Unexpected driver start type is preserved: "+start);}
+            value=fresh();value.Start=4;stops=deletes=probes=0;
+            Assert(DriverShutdown.Release(()=>value,stop,delete,empty,folder) && stops==1 && deletes==1 && probes==2,"Disabled registration of a loaded owned driver is released after consumer checks");
+            value=fresh();value.Path=Path.Combine(folder,"external","WinDivert64.sys");stops=deletes=0;
+            Assert(DriverShutdown.Release(()=>value,stop,delete,empty,folder,true) && stops==1 && deletes==1,"Explicit external cleanup releases only an unused recognized driver");
+            value=fresh();value.Path=Path.Combine(folder,"external","unrelated.sys");stops=deletes=0;bool unsafeDriver=false;
+            try{DriverShutdown.Release(()=>value,stop,delete,empty,folder,true);}catch(EngineStopException){unsafeDriver=true;}
+            Assert(unsafeDriver && stops==0 && deletes==0,"Explicit external cleanup rejects unrelated kernel drivers");
             for(int occupied=1;occupied<=2;occupied++){
                 value=fresh();stops=deletes=probes=0;bool refused=false;int threshold=occupied;
                 try{DriverShutdown.Release(()=>value,stop,delete,()=>++probes>=threshold,folder);}catch(EngineStopException){refused=true;}
@@ -1403,6 +1411,11 @@ namespace ZapretDesktop {
                 token=>Task.FromResult(results(ServiceChecks.Targets.Length,10)),CancellationToken.None,null,null,true,
                 token=>{confirmCalls++;return Task.FromResult(results(running=="flaky"?4:ServiceChecks.Targets.Length,20));});
             Assert(selected.Winner.Strategy=="good" && confirmCalls==2,"Quick mode continues after failed confirmation");
+            running=null;confirmCalls=0;
+            selected=await StrategySelector.Run(new[]{"slow-service"},(name,token)=>{running=name;return Task.FromResult(0);},()=>running=null,
+                token=>Task.FromResult(results(4,6000)),CancellationToken.None,null,null,true,
+                token=>{confirmCalls++;return Task.FromResult(results(ServiceChecks.Targets.Length,9000));});
+            Assert(selected.Winner!=null && selected.Winner.Confirmed && confirmCalls==1,"Quick timeout gets a longer full probe before a partial strategy is discarded");
             string next="99.0.0";
             string json="{\"tag_name\":\"v"+next+"\",\"draft\":false,\"prerelease\":false,\"assets\":[{\"name\":\"Obhod-"+next+"-win-x64.zip\",\"browser_download_url\":\"https://github.com/"+ShellUpdates.Repository+"/releases/download/v"+next+"/Obhod-"+next+"-win-x64.zip\",\"digest\":\"sha256:"+new string('a',64)+"\",\"size\":100}]}";
             Assert(ParseFixture(json).Version==next,"Stable newer shell release accepted");

@@ -35,6 +35,9 @@ namespace ZapretDesktop {
                 if(!firstMatch)foreach(var candidate in selection.Candidates.Where(x=>x.Complete).OrderBy(x=>String.Equals(x.Strategy,preferred,StringComparison.OrdinalIgnoreCase)?0:1).ThenBy(x=>x.Latency).ToArray()){
                     token.ThrowIfCancellationRequested();if(progress!=null)progress(strategies.Length,strategies.Length,"Повторные пробы: "+candidate.Strategy);keep=await Confirm(candidate,start,stop,confirmation??check,token,completed);if(keep){selection.Winner=candidate;break;}
                 }
+                if(firstMatch && !keep && confirmation!=null)foreach(var candidate in selection.Candidates.Where(x=>!x.Complete && x.Passed>0 && x.Error.Length==0).OrderByDescending(x=>x.Passed).ThenBy(x=>x.Latency).Take(3).ToArray()){
+                    token.ThrowIfCancellationRequested();if(progress!=null)progress(strategies.Length,strategies.Length,"Полная проба: "+candidate.Strategy);keep=await Confirm(candidate,start,stop,confirmation,token,completed);if(keep){selection.Winner=candidate;break;}
+                }
             }catch(Exception ex){failure=ex;}
             if(!keep)await Task.Run(stop);
             if(failure!=null)System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();

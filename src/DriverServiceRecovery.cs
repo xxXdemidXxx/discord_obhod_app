@@ -32,6 +32,11 @@ namespace ZapretDesktop {
             if(conflict())return false;
             var before=read();if(before==null)return false;
             if(log!=null)log("WinDivert: состояние службы "+before.State+" · тип "+before.Type+" · запуск "+before.Start);
+            if(before.Start==4 && before.Type==1 && DriverShutdown.OwnedPath(HostWire.ProtectedRoot,before.Path) && before.State==1){
+                Trust.NoLinks(EngineHost.NormalizeDriverPath(before.Path));var owned=read();
+                if(conflict() || owned==null || owned.Type!=1 || owned.Start!=4 || owned.State!=1 || !String.Equals(before.Path,owned.Path,StringComparison.OrdinalIgnoreCase))return false;
+                delete();return true;
+            }
             if(!Eligible(before,missing))return false;
             var current=read();
             if(conflict() || !Eligible(current,missing) || !String.Equals(before.Path,current.Path,StringComparison.OrdinalIgnoreCase))return false;
@@ -48,7 +53,11 @@ namespace ZapretDesktop {
                 try {
                     try{locked=mutex.WaitOne(5000);}catch(AbandonedMutexException){locked=true;}
                     if(!locked)throw new EngineSetupException("WinDivert занят установкой другим приложением. Повторите запуск.");
-                    using(var service=new NativeService())TryRepair(service.Read,service.Delete,Conflict,MissingFile,log);
+                    using(var service=new NativeService()){
+                        var value=service.Read();
+                        if(value!=null && value.Type==1 && (value.State==3 || (value.Start==4 && value.State==1 && !DriverShutdown.OwnedPath(HostWire.ProtectedRoot,value.Path))))throw new EngineSetupException("WinDivert отключён или ещё останавливается. Остановите обходы; для старого zapret используйте «Удалить старые службы» в настройках.");
+                        TryRepair(service.Read,service.Delete,Conflict,MissingFile,log);
+                    }
                 }catch(Win32Exception ex){throw new EngineSetupException("Не удалось проверить или очистить устаревшую регистрацию WinDivert.\n"+ex.Message,ex);}
                 finally{if(locked)mutex.ReleaseMutex();}
             }

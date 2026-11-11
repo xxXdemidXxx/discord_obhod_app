@@ -12,7 +12,7 @@ namespace ZapretDesktop {
     public sealed partial class MainForm {
         DarkSelect backendChoice,proxyProfile;SurfacePanel proxyPane;
         ToggleOption strictScope,scopeYouTube,scopeDiscord,scopeVoice;
-        Button stopEverything,inspectFootprint,openProxyYouTube,openProxyDiscord,applyProxy;
+        Button stopEverything,inspectFootprint,openProxyYouTube,openProxyDiscord,applyProxy,externalCleanup;
         Label footprintText,backendHint;NetworkFootprint footprint;bool footprintBusy,backendChanging,stopAllAfterScan;
         string cleanupFailure;
         readonly Dictionary<string,DashboardSnapshot> backendResults=new Dictionary<string,DashboardSnapshot>();
@@ -47,7 +47,7 @@ namespace ZapretDesktop {
             }finally{status.ResumeLayout(false);}
         }
         Control BuildScopeCard() {
-            var surface=new SurfacePanel{Name="BypassScopeCard",Dock=DockStyle.Top,Height=Px(388),Margin=new Padding(0,0,0,Px(16))};
+            var surface=new SurfacePanel{Name="BypassScopeCard",Dock=DockStyle.Top,Height=Px(446),Margin=new Padding(0,0,0,Px(16))};
             scopeSurface=surface;scopeTitle=Theme.Label("Настройки zapret",18,true);
             strictScope=new ToggleOption{Name="StrictServiceScope",Text="Ограничивать zapret выбранными сервисами"};
             scopeYouTube=new ToggleOption{Name="ScopeYouTube",Text="YouTube"};scopeDiscord=new ToggleOption{Name="ScopeDiscord",Text="Discord"};scopeVoice=new ToggleOption{Name="ScopeDiscordVoice",Text="Голос Discord · UDP / STUN"};
@@ -56,7 +56,7 @@ namespace ZapretDesktop {
             var details=Theme.Button("Подробности в журнале");details.Click+=(s,e)=>tabs.SelectedIndex=3;
             footprintText=Theme.Label("Остановка ещё не проверена",9);footprintText.ForeColor=Theme.Muted;
             surface.Controls.AddRange(new Control[]{scopeTitle,strictScope,scopeYouTube,scopeDiscord,scopeVoice,scopeHint,inspectFootprint,details,footprintText});
-            surface.Resize+=(s,e)=>{int p=surface.Padding.Left,w=surface.Width-p*2;bool proxy=ProxyMode;int y=proxy?44:84;scopeTitle.SetBounds(p,p,w,Px(34));strictScope.SetBounds(p,p+Px(44),w,Px(32));scopeYouTube.SetBounds(p,p+Px(y),Px(190),Px(32));scopeDiscord.SetBounds(p+Px(200),p+Px(y),Px(190),Px(32));scopeVoice.SetBounds(p+Px(400),p+Px(y),Math.Max(Px(260),w-Px(400)),Px(32));scopeHint.SetBounds(p,p+Px(proxy?90:130),w,Px(72));inspectFootprint.SetBounds(p,p+Px(proxy?170:216),Px(300),Px(38));details.SetBounds(p+Px(312),inspectFootprint.Top,Px(230),Px(38));footprintText.SetBounds(p,p+Px(proxy?224:270),w,Px(68));};
+            surface.Resize+=(s,e)=>{int p=surface.Padding.Left,w=surface.Width-p*2;bool proxy=ProxyMode;int y=proxy?44:84;scopeTitle.SetBounds(p,p,w,Px(34));strictScope.SetBounds(p,p+Px(44),w,Px(32));scopeYouTube.SetBounds(p,p+Px(y),Px(190),Px(32));scopeDiscord.SetBounds(p+Px(200),p+Px(y),Px(190),Px(32));scopeVoice.SetBounds(p+Px(400),p+Px(y),Math.Max(Px(260),w-Px(400)),Px(32));scopeHint.SetBounds(p,p+Px(proxy?90:130),w,Px(72));inspectFootprint.SetBounds(p,p+Px(proxy?170:216),Px(300),Px(38));details.SetBounds(p+Px(312),inspectFootprint.Top,Px(230),Px(38));footprintText.SetBounds(p,p+Px(proxy?224:270),w,Px(126));};
             foreach(var option in new[]{strictScope,scopeYouTube,scopeDiscord,scopeVoice})option.CheckedChanged+=async(s,e)=>{if(!loading)await SaveScope();};
             inspectFootprint.Click+=async(s,e)=>await InspectFootprint();return surface;
         }
@@ -101,7 +101,7 @@ namespace ZapretDesktop {
             CloseProxyBrowsers();if(youtubeDns!=null){youtubeDns.Dispose();youtubeDns=null;}
             runner.Stop();runner.SetTelegram(store.Current,false);TelegramFilter.Set(store.Current,false);DiscordFilter.Set(store.Current,false);
             if(runner.StartupEnabled)runner.SetStartup(false,store.Current,store.Settings.Strategy);
-            if(!StartupRegistration.RemoveOwned(Application.ExecutablePath))Append("Автозапуск другой копии ByPass оставлен без изменений.");store.Settings.StartWithWindows=false;store.Save();runner.ReleaseIfIdle();
+            if(!StartupRegistration.RemoveOwned(Application.ExecutablePath))Append("Автозапуск другой копии ByPass оставлен без изменений.");store.Settings.StartWithWindows=false;store.Save();runner.ReleaseIfIdle(store.Current);
             }catch(Exception ex){cleanupFailure=ex.Message;throw;}
         }
         async Task StopEverything() {
@@ -112,9 +112,17 @@ namespace ZapretDesktop {
         }
         async Task InspectFootprint() {
             if(footprintBusy)return;footprintBusy=true;
-            try{footprint=await Task.Run(()=>NetworkFootprint.Read());string warning=cleanupFailure??runner.StopWarning;if(!String.IsNullOrEmpty(warning)){footprint.Verified=false;footprint.Items.Add("Полная остановка не подтверждена: "+warning);}Append("Проверка остановки: "+footprint.Summary);foreach(string item in footprint.Items)Append("  "+item);}
+            inspectFootprint.Enabled=false;inspectFootprint.Text="Проверяем…";footprintText.Text="Читаем текущее состояние процессов и служб Windows…";
+            try{footprint=await Task.Run(()=>NetworkFootprint.Read());if(footprint.Clean)cleanupFailure=null;Append("Проверка остановки: "+footprint.Summary);foreach(string item in footprint.Items)Append("  "+item);}
             catch(Exception ex){footprint=new NetworkFootprint{Verified=false};footprint.Items.Add(ex.Message);Append("Не удалось проверить остановку: "+ex.Message);}
-            finally{footprintBusy=false;if(!IsDisposed)RefreshBackendControls();}
+            finally{footprintBusy=false;if(!IsDisposed){inspectFootprint.Text="Проверить процессы и службы";RefreshBackendControls();}}
+        }
+        async Task RemoveOtherBypass(){
+            if(busy || starting || scanning || testing || runner.Running || runner.TelegramRunning || runner.StartupEnabled)return;
+            await InspectFootprint();if(footprint==null || !footprint.HasExternalZapret)return;
+            if(MessageBox.Show(this,"Остановить другой zapret, удалить его службы и регистрацию WinDivert, если драйвер никем не используется?\n\nФайлы на диске сохранятся. После очистки можно включить ByPass.","Удаление старого zapret",MessageBoxButtons.OKCancel,MessageBoxIcon.Warning)!=DialogResult.OK)return;
+            busy=true;RefreshState();try{await StopChecks();await Task.Run(()=>runner.RemoveExternal(store.Current));cleanupFailure=null;InvalidateChecks("Старые службы zapret удалены · включите ByPass");}
+            catch(Exception ex){Error(ex);}finally{busy=false;}await InspectFootprint();RefreshState();
         }
         async Task SetProxyEnabled(bool enabled) {
             if(loading || busy || starting || scanning || appUpdates.Working){RefreshState();return;}
@@ -144,7 +152,8 @@ namespace ZapretDesktop {
                 backendChoice.Enabled=idle && !checkingUpdates;stopEverything.Enabled=(!busy && !starting && !appUpdates.Working) || scanning;
                 strictScope.Enabled=scopeYouTube.Enabled=scopeDiscord.Enabled=scopeVoice.Enabled=idle && !runner.Running && !runner.TelegramRunning && !runner.StartupEnabled;
                 scopeVoice.Enabled=scopeVoice.Enabled && !ProxyMode && store.Settings.ScopeDiscord;
-                inspectFootprint.Enabled=!footprintBusy && idle;footprintText.Text=footprint==null?"Проверка покажет и остановленные службы. Чужие компоненты выводятся в журнале.":footprint.Summary+(footprint.Clean?"\nФайлы программы и настройки сохраняются.":"\nПодробности и пути — в журнале. Чужие службы автоматически не удаляются.");footprintText.ForeColor=footprint==null?Theme.Muted:footprint.Clean?Theme.Success:Theme.Warning;
+                inspectFootprint.Enabled=!footprintBusy && idle;if(!footprintBusy)footprintText.Text=footprint==null?"Проверка покажет текущие процессы и регистрации служб Windows.":footprint.Display;footprintText.ForeColor=footprint==null?Theme.Muted:footprint.Clean?Theme.Success:Theme.Warning;
+                if(externalCleanup!=null){externalCleanup.Enabled=idle && !runner.Running && !runner.TelegramRunning && !runner.StartupEnabled && footprint!=null && footprint.HasExternalZapret;if(footprint!=null && footprint.HasExternalZapret){externalStatus.Text="Найдены другой zapret или регистрация WinDivert · проверьте список ниже";externalStatus.ForeColor=Theme.Warning;}}
                 ApplyBackendView();
                 proxyProfile.Enabled=applyProxy.Enabled=idle;openProxyYouTube.Enabled=idle && runner.ProxyRunning && CurrentScope().YouTube;openProxyDiscord.Enabled=idle && runner.ProxyRunning && CurrentScope().Discord;
                 if(ProxyMode){telegram.Enabled=false;startWindows.Enabled=false;dashboard.Apply.Enabled=dashboard.Scan.Enabled=false;dashboard.SetFeedback(false);}
@@ -161,7 +170,7 @@ namespace ZapretDesktop {
         void ApplyBackendView(){
             bool proxy=ProxyMode;if(renderedBackend!=proxy){
                 dashboard.SuspendLayout();try{if(renderedBackend==null)dashboard.ClearResults(proxy?"Включите ByeDPI или проверьте прямое соединение":"Примените стратегию zapret или проверьте прямое соединение");profiles.Parent.Visible=!proxy;proxyPane.Visible=proxy;proxyPane.Bounds=profiles.Parent.Bounds;if(proxy)proxyPane.BringToFront();if(backendTransition.Active)backendTransition.BringToFront();dashboard.SetProxyMode(proxy);
-                    strictScope.Visible=scopeVoice.Visible=!proxy;scopeTitle.Text=proxy?"Настройки ByeDPI":"Настройки zapret";scopeSurface.Height=Px(proxy?342:388);
+                    strictScope.Visible=scopeVoice.Visible=!proxy;scopeTitle.Text=proxy?"Настройки ByeDPI":"Настройки zapret";scopeSurface.Height=Px(proxy?400:446);
                     scopeHint.Text=proxy?"Выбранные сервисы открываются в отдельном окне через локальный прокси.\nУстановленный Discord и голос не подключаются.\nЭти настройки сохраняются отдельно от zapret.":"В ограниченном режиме общие CDN/IPSet, GameFilter и TCP timestamps исключены.\nГолос использует более широкое UDP-правило.\nДля проверки игр оставьте его выключенным.";
                     if(startupBackendCard!=null)startupBackendCard.Visible=!proxy;if(coreBackendCard!=null)coreBackendCard.Visible=!proxy;if(coreBackendGap!=null)coreBackendGap.Visible=!proxy;tabs.SetPageAvailable(4,!proxy);
                     discord.Text=proxy?"Включить ByeDPI":"Включить zapret";renderedBackend=proxy;

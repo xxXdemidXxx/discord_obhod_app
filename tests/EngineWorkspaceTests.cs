@@ -12,6 +12,25 @@ using System.Windows.Forms;
 
 namespace ZapretDesktop {
     static partial class Tests {
+        static void FootprintRepairTests(){
+            string own=Path.Combine(HostWire.ProtectedRoot,"startup-"+new string('a',32),"bin","winws.exe");
+            Assert(NetworkFootprint.OwnImage("\""+own+"\" --wf-tcp=443"),"Own startup snapshot is recognized independently of the GUI installation folder");
+            Assert(!ExternalBypass.CanRemove(StartupService.Name,"\""+own+"\" --wf-tcp=443") && !ExternalBypass.CanRemove("zapret",own),"External cleanup preserves ByPass startup and protected executables");
+            Assert(ExternalBypass.CanRemove("zapret","\"C:\\old zapret\\bin\\winws.exe\" --wf-tcp=443"),"Missing legacy executable still identifies its stale service registration");
+            Assert(!ExternalBypass.CanRemove("other","C:\\old\\other.exe --path=winws.exe") && !ExternalBypass.CanRemove("other","winws.exe") && !ExternalBypass.CanRemove("other","\"C:\\old\\winws.exe.bak\""),"Cleanup rejects unrelated executables and ambiguous relative paths");
+            int stops=0,removed=0;bool stopped=false;string command="legacy";
+            ExternalBypass.RemoveService("legacy",()=>command,()=>stopped,()=>{stops++;stopped=true;},()=>removed++);
+            Assert(stops==1 && removed==1,"Confirmed cleanup stops the legacy service before removing its registration");
+            stops=removed=0;bool refused=false;try{ExternalBypass.RemoveService("legacy",()=>"changed",()=>false,()=>stops++,()=>removed++);}catch(IOException){refused=true;}
+            Assert(refused && stops==0 && removed==0,"Changed service is preserved before any mutation");
+            command="legacy";refused=false;try{ExternalBypass.RemoveService("legacy",()=>command,()=>false,()=>{stops++;command="changed";},()=>removed++);}catch(IOException){refused=true;}
+            Assert(refused && stops==1 && removed==0,"Service changing during stop is never deleted");
+            var result=new NetworkFootprint{OwnComponents=2};result.Items.Add("ByPass: служба ByPass.Startup · Running");result.Items.Add("ByPass: служба WinDivert · Running");
+            Assert(!result.Summary.Contains("другой zapret") && result.Display.Contains("ByPass.Startup"),"Fresh inspection displays current own components directly on screen");
+            DriverRegistration value=new DriverRegistration{Path=Path.Combine(HostWire.ProtectedRoot,"runtime-"+new string('b',32),"bin","WinDivert64.sys"),Type=1,Start=4,State=1};int deletes=0;
+            Assert(DriverServiceRecovery.TryRepair(()=>value,()=>deletes++,()=>false,_=>false,null) && deletes==1,"Stopped disabled own driver registration is safely recreated on next launch");
+            value.State=4;deletes=0;Assert(!DriverServiceRecovery.TryRepair(()=>value,()=>deletes++,()=>false,_=>false,null) && deletes==0,"Loaded disabled driver is reused without registration mutation");
+        }
         static void HeaderLayoutTests(string root,string official){
             string folder=Path.Combine(root,"tests","fixture-header-"+Guid.NewGuid().ToString("N"));var flags=BindingFlags.Instance|BindingFlags.NonPublic;
             var previous=NetworkFootprint.TestRead;NetworkFootprint.TestRead=()=>{var result=new NetworkFootprint();result.Items.Add("Тест: внешняя служба WinDivert");result.Items.Add("Тест: внешний winws");return result;};
@@ -88,6 +107,8 @@ namespace ZapretDesktop {
                     tabs.SelectedIndex=6;Application.DoEvents();Assert(telegram.Visible && telegram.Parent.ClientRectangle.Contains(telegram.Bounds),"Telegram has its own reachable page");Capture(form,Path.Combine(root,"tests","window-engines-telegram.png"));
                     tabs.SelectedIndex=1;Application.DoEvents();Capture(form,Path.Combine(root,"tests","window-engines-scope.png"));
                     inspected=new NetworkFootprint();inspected.Items.Add("Тест: служба WinDivert · Running · C:\\test-only\\WinDivert64.sys");Pump(invoke("InspectFootprint",null));Assert(((Label)typeof(MainForm).GetField("footprintText",flags).GetValue(form)).ForeColor==Theme.Warning,"Residual components are not reported as a clean shutdown");Capture(form,Path.Combine(root,"tests","window-engines-residual.png"));
+                    var footprintLabel=(Label)typeof(MainForm).GetField("footprintText",flags).GetValue(form);Assert(footprintLabel.Text.Contains("WinDivert"),"Inspection button shows actual fresh service details without opening the log");
+                    typeof(MainForm).GetField("cleanupFailure",flags).SetValue(form,"Previous failed stop");inspected=new NetworkFootprint();Pump(invoke("InspectFootprint",null));Assert(footprintLabel.ForeColor==Theme.Success && !footprintLabel.Text.Contains("Previous failed stop"),"Fresh clean inspection clears a stale cleanup warning");
                     inspected=new NetworkFootprint();startup=new StartupState{Installed=true,Owned=true,Running=true,Strategy=store.Settings.Strategy,Engine=store.Settings.Engine};registration=StartupRegistration.Command(Application.ExecutablePath);store.Settings.StartWithWindows=true;runner.RefreshStartup();Pump(invoke("StopEverything",null));Assert(!runner.Running && !runner.TelegramRunning && !startup.Owned && registration==null && !store.Settings.StartWithWindows,"Global stop removes an installed own service and logon startup as well as bypasses");
                     if(native){
                         string image=ProxyBypass.Image(folder);Directory.CreateDirectory(Path.GetDirectoryName(image));File.Copy(Path.Combine(root,"downloads","alternatives","byedpi-0.17.3","ciadpi.exe"),image);Assert(Trust.Hash(image)==ProxyBypass.ImageHash,"Native ByeDPI hash matches the pinned official artifact");

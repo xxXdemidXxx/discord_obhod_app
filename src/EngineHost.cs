@@ -151,11 +151,23 @@ namespace ZapretDesktop {
                                     case "telegram-stop":if(telegram!=null){telegram.Dispose();telegram=null;}break;
                                     case "startup-disable":runner.Stop();var removingStartup=StartupService.Read(installation);if(removingStartup.Owned)lastEngine=removingStartup.Snapshot;StartupService.Remove(installation);break;
                                     case "stop-external":runner.Stop();ExternalBypass.Stop(line=>HostWire.Write(pipe,new{type="log",text=line}));break;
+                                    case "remove-external":
+                                        if(runner.Running || (telegram!=null && telegram.Running) || StartupService.Read(installation).Running)throw new InvalidOperationException("Сначала выключите ByPass и его автозапуск.");
+                                        string cleanupVersion=(string)command["engine"];
+                                        if(!System.Text.RegularExpressions.Regex.IsMatch(cleanupVersion,@"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$") || cleanupVersion.Contains(".."))throw new InvalidDataException("Некорректная версия.");
+                                        Dictionary<string,byte[]> cleanupInputs=null;HostWire.AsCaller(parent,()=>{cleanupInputs=ReadInputs(Path.Combine(installation,"data","engines",cleanupVersion));});RememberApproval(cleanupInputs);
+                                        WriteSnapshot(snapshot,cleanupInputs,preparedVersion!=null);lastEngine=snapshot;
+                                        ExternalBypass.Remove();DriverShutdown.Unload(snapshot,null,true);break;
                                     case "stop":runner.Stop();if(StartupService.Read(installation).Owned)StartupService.Stop(installation);break;
                                     case "status":break;
                                     case "release-idle":
                                         var idleStartup=StartupService.Read(installation);
                                         if(runner.Running || (telegram!=null && telegram.Running) || (idleStartup.Owned && idleStartup.Running))break;
+                                        if(lastEngine==null && !idleStartup.Owned && command["engine"]!=null){
+                                            string idleVersion=(string)command["engine"];
+                                            if(!System.Text.RegularExpressions.Regex.IsMatch(idleVersion,@"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$") || idleVersion.Contains(".."))throw new InvalidDataException("Некорректная версия.");
+                                            Dictionary<string,byte[]> idleInputs=null;HostWire.AsCaller(parent,()=>{idleInputs=ReadInputs(Path.Combine(installation,"data","engines",idleVersion));});RememberApproval(idleInputs);WriteSnapshot(snapshot,idleInputs,false);lastEngine=snapshot;
+                                        }
                                         done=true;
                                         DriverShutdown.Unload(lastEngine??(idleStartup.Owned?idleStartup.Snapshot:null),line=>HostWire.Write(pipe,new{type="log",text=line}));
                                         break;

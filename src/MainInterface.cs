@@ -61,9 +61,10 @@ namespace ZapretDesktop {
             startWindows.CheckedChanged+=async(sender,e)=>await SetWindowsStartup();
             var externalCard=new SurfacePanel{Name="ExternalBypassCard",Dock=DockStyle.Top,Height=Px(188),Margin=new Padding(0,0,0,Px(16))};
             var externalTitle=Theme.Label("Другой обход",18,true);externalStatus=Theme.Label("Другой обход не обнаружен",9);externalStatus.ForeColor=Theme.Muted;
-            var externalHelp=Theme.Label("Останавливает обнаруженный winws и связанные службы.\nФайлы и настройки автозапуска остаются на месте.",9);externalHelp.ForeColor=Theme.Muted;
+            var externalHelp=Theme.Label("Удаление папки zapret не удаляет его службы Windows.\nДля очистки выключите ByPass и его автозапуск. Файлы сохраняются.",9);externalHelp.ForeColor=Theme.Muted;
             externalBypass=Theme.Button("Отключить другой обход");externalBypass.Name="StopExternalBypass";externalBypass.Click+=async(s,e)=>await StopOtherBypass();externalCard.Controls.AddRange(new Control[]{externalTitle,externalStatus,externalHelp,externalBypass});
-            externalCard.Resize+=(s,e)=>{int p=externalCard.Padding.Left,w=externalCard.Width-p*2;externalTitle.SetBounds(p,p,w,Px(32));externalStatus.SetBounds(p,p+Px(38),w,Px(24));externalHelp.SetBounds(p,p+Px(66),w,Px(42));externalBypass.SetBounds(p,p+Px(116),Math.Min(w,Px(300)),Px(40));};
+            externalCleanup=Theme.Button("Удалить старые службы");externalCleanup.Name="RemoveExternalBypass";externalCleanup.Click+=async(s,e)=>await RemoveOtherBypass();externalCard.Controls.Add(externalCleanup);
+            externalCard.Resize+=(s,e)=>{int p=externalCard.Padding.Left,w=externalCard.Width-p*2;externalTitle.SetBounds(p,p,w,Px(32));externalStatus.SetBounds(p,p+Px(38),w,Px(24));externalHelp.SetBounds(p,p+Px(66),w,Px(42));int actionWidth=Math.Min((w-Px(12))/2,Px(300));externalBypass.SetBounds(p,p+Px(116),actionWidth,Px(40));externalCleanup.SetBounds(p+actionWidth+Px(12),externalBypass.Top,actionWidth,Px(40));};
             var mediaCard=new SurfacePanel{Name="TelegramMediaCard",Dock=DockStyle.Top,Height=Px(190),Margin=new Padding(0,0,0,Px(16))};
             telegramMedia=mediaCard;
             var mediaTitle=Theme.Label("Медиа Telegram",18,true);telegramRelay=new ToggleOption{Name="TelegramRelay",Text="Резерв Flowseal / Cloudflare"};

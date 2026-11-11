@@ -302,7 +302,7 @@ namespace ZapretDesktop {
                     async (name,cancel)=>{InvalidateChecks("Проверяется: "+name.Replace(".bat",""));await StartEngine(name,cancel);},
                     ()=>runner.Stop(),
                     async cancel=>await ServiceChecks.Batch(cancel,(index,item)=>{if(!IsDisposed)dashboard.SetResult(index,item);},quick?6:12,CheckEnabled,tgSnapshot),token,
-                    (index,total,name)=>{if(IsDisposed)return;scanStep=index+" / "+total+" · "+Theme.StrategyName(name);dashboard.ScanSummary.Text=scanStep;dashboard.Progress(name);RefreshState();},
+                    (index,total,name)=>{if(IsDisposed)return;scanStep=index+" / "+total+" · "+Theme.StrategyName(name);dashboard.ScanSummary.Text=scanStep+(quick?"":"\nПолный перебор может занять несколько минут");dashboard.Progress(name);RefreshState();},
                     candidate=>{if(IsDisposed)return;dashboard.Record(candidate);checkSummary.Text=candidate.Strategy.Replace(".bat","")+" · "+candidate.Passed+"/"+candidate.Total;Append("Автоподбор: "+candidate.Strategy+" · "+candidate.Passed+"/"+candidate.Total+(candidate.Error.Length>0?" · "+candidate.Error:""));for(int i=0;i<candidate.Results.Length;i++)Append("  "+ServiceChecks.Targets[i].Name+": "+candidate.Results[i].Detail+" · "+candidate.Results[i].Milliseconds+" мс");},quick,async cancel=>await ServiceChecks.Batch(cancel,(index,item)=>{if(!IsDisposed)dashboard.SetResult(index,item);},12,CheckEnabled,tgSnapshot),strategyFeedback.Preferred(original));
                 if(result.Winner!=null) {
                     store.Settings.Strategy=result.Winner.Strategy;store.Save();activeStrategy=result.Winner.Strategy;chosen=true;
@@ -312,7 +312,8 @@ namespace ZapretDesktop {
                     dashboard.ScanSummary.Text="Выбран для проверки: "+Theme.StrategyName(activeStrategy);
                 }else {
                     bool dnsFailure=result.Candidates.Any(x=>x.Results.Any(y=>y.Failure=="dns"));
-                    dashboard.ScanSummary.Text="Полного результата не найдено."+(dnsFailure?"\nЕсть ошибки DNS — откройте диагностику.":"\nРезультаты всех стратегий — в таблице.");
+                    var best=result.Candidates.Where(x=>x.Passed>0).OrderByDescending(x=>x.Passed).ThenBy(x=>x.Latency).FirstOrDefault();
+                    dashboard.ScanSummary.Text="Полного результата не найдено."+(dnsFailure?"\nЕсть ошибки DNS — откройте диагностику.":best==null?"\nРезультаты всех стратегий — в таблице.":"\nЛучший: "+Theme.StrategyName(best.Strategy)+" · "+best.Passed+"/"+best.Total);
                 }
             }catch(OperationCanceledException){if(!IsDisposed)dashboard.ScanSummary.Text="Автоподбор отменён.";}
             catch(Exception ex){setupFailed=ex is EngineSetupException;if(!IsDisposed){dashboard.ScanSummary.Text=ex is EngineSetupException?"Подбор остановлен: не удалось запустить ядро.\nПодробности — в журнале.":"Автоподбор завершился с ошибкой.";Error(ex);}}

@@ -124,7 +124,7 @@ namespace ZapretDesktop {
 #endif
             if(StartupEnabled && !connected)Connect();if(connected)Ask("stop",null,null);running=false;}}
         // Explicit user stop only. Selection/update stops keep their session.
-        internal void ReleaseIfIdle(){lock(gate){
+        internal void ReleaseIfIdle(string engine=null){lock(gate){
             if(Running || telegramRunning)return;
             if(!connected && IdleReleased)return;
             IdleReleased=false;StopWarning=null;
@@ -134,7 +134,8 @@ namespace ZapretDesktop {
                 if(TestStop!=null || TestTelegram!=null){IdleReleased=true;return;}
 #endif
                 if(!connected && !StartupEnabled && NetworkFootprint.Read().Clean){IdleReleased=true;return;}
-                Connect();if(StartupEnabled)Ask("startup-disable",null,null);bool closed=Ask("release-idle",null,null);
+                if(engine!=null){Trust.VerifyEngine(engine);if(!String.Equals(Path.GetDirectoryName(Path.GetFullPath(engine)),Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"data","engines").TrimEnd('\\'),StringComparison.OrdinalIgnoreCase))throw new InvalidDataException("Ядро должно находиться в папке приложения.");}
+                Connect();if(StartupEnabled)Ask("startup-disable",null,null);bool closed=Ask("release-idle",engine==null?null:Path.GetFileName(engine),null);
                 if(!closed && !Running && !telegramRunning)throw new EngineStopException("Обходы выключены, но помощник не подтвердил полную остановку.");
                 IdleReleased=closed;
             }catch(Exception ex){StopWarning=ex.Message;throw new EngineStopException(ex.Message,ex);}
@@ -186,6 +187,10 @@ namespace ZapretDesktop {
             if(TestStopExternal!=null){TestStopExternal();return;}
 #endif
             Connect();Ask("stop-external",null,null);}}
+        internal void RemoveExternal(string engine){lock(gate){
+            Trust.VerifyEngine(engine);
+            if(!String.Equals(Path.GetDirectoryName(Path.GetFullPath(engine)),Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"data","engines").TrimEnd('\\'),StringComparison.OrdinalIgnoreCase))throw new InvalidDataException("Ядро должно находиться в папке приложения.");
+            Connect();Ask("remove-external",Path.GetFileName(engine),null);StopWarning=null;}}
         public void Dispose(){proxy.Dispose();if(observer!=null)observer.Dispose();lock(gate){try{if(connected)Ask("shutdown",null,null);}catch{}connected=false;if(pipe!=null)pipe.Dispose();if(reader!=null)try{reader.Wait(2000);}catch{}if(helper!=null)helper.Dispose();}response.Dispose();}
     }
 }
