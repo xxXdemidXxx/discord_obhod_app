@@ -440,7 +440,7 @@ namespace ZapretDesktop {
             state.Text = scanning ? "Подбираем стратегию" : on ? (runner.TelegramRunning?"Оба обхода включены":"Discord и YouTube включены") : runner.TelegramRunning?"Telegram включён":external?"Другой обход запущен":"Сервисы выключены"; state.ForeColor=on || runner.TelegramRunning?Theme.Success:external?Theme.Warning:Theme.Text;
             subtitle.Text = scanning ? (scanStep.Length>0?scanStep:"Проверяем сетевые пробы…") : on ? Theme.StrategyName(activeStrategy) : runner.TelegramRunning?"Основная стратегия выключена · Telegram работает отдельно":external?"Другой обход можно отключить в «Настройки»":!String.IsNullOrEmpty(runner.StopWarning)?"Обходы выключены · полная остановка не подтверждена":runner.IdleReleased?"Обходы выключены · драйвер выгружен":"Включите нужный тумблер";
             profiles.Enabled = categories.Enabled = !busy && !starting && !scanning;
-            games.Enabled = tcp.Enabled = udp.Enabled = saveGameButton.Enabled = !on && !external && !busy && !starting && !scanning; domainEditor.SetAllowed(!external && !busy && !starting && !scanning,on);
+            games.Enabled = tcp.Enabled = udp.Enabled = saveGameButton.Enabled = !on && !external && !busy && !starting && !scanning; domainEditor.SetAllowed(!external && !busy && !starting && !scanning,on,!ProxyMode && store.Settings.StrictScope);
             dashboard.ScanMode.Enabled = !busy && !starting && !scanning;
             dashboard.SetFeedback(on && runner.Ready && !busy && !starting && !scanning && !testing && !dnsBusy && !exiting);
             dashboard.Apply.Enabled = dashboard.Scan.Enabled = !busy && !external && !starting && !scanning && !testing && !dnsBusy;

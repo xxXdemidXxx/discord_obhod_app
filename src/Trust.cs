@@ -60,6 +60,7 @@ namespace ZapretDesktop {
         }
         public static bool Mutable(string path) {
             return (path.StartsWith("lists/",StringComparison.OrdinalIgnoreCase) && path.EndsWith(".txt",StringComparison.OrdinalIgnoreCase) && path.IndexOf('/',6)<0)
+                || path=="lists/list-general-user.txt.bak" || path=="lists/list-exclude-user.txt.bak" || path=="lists/ipset-exclude-user.txt.bak"
                 || path=="utils/game_filter.enabled" || path==ServiceScope.RelativePath || path==TelegramFilter.RelativePath || path==TelegramRelay.RelativePath || path==DiscordFilter.RelativePath || path=="bin/ACTIVE_GAME_UDP.bin" || path=="bin/ACTIVE_DISCORD_UDP.bin";
         }
         public static Dictionary<string,object> VerifyEngine(string root) {

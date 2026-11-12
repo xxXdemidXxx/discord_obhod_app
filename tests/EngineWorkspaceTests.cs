@@ -12,6 +12,43 @@ using System.Windows.Forms;
 
 namespace ZapretDesktop {
     static partial class Tests {
+        static void DomainCrashRegressionTests(string root,string official){
+            string folder=Path.Combine(root,"tests","fixture-domain-crash-"+Guid.NewGuid().ToString("N"));var flags=BindingFlags.Instance|BindingFlags.NonPublic;
+            var previousStartup=StartupService.TestRead;var previousRegistration=StartupRegistration.TestRead;var previousFootprint=NetworkFootprint.TestRead;var previousProbe=ServiceChecks.TestRun;
+            StartupService.TestRead=_=>new StartupState();StartupRegistration.TestRead=()=>null;NetworkFootprint.TestRead=()=>new NetworkFootprint();ServiceChecks.TestRun=(target,token)=>Task.FromResult(new CheckResult{State=1,Detail="Fixture",Milliseconds=1});
+            try{
+                var store=new Store(folder);Copy(official,store.Current);store.Settings.CheckUpdates=store.Settings.AutoAppUpdates=store.Settings.AutoInstallCore=store.Settings.AutoInstallShell=false;store.Save();
+                if(Updater.Version(store.Current)=="1.10.4"){
+                    string archive=Path.Combine(root,"downloads","zapret-discord-youtube-1.10.4.zip"),hash=Trust.Hash(archive);long size=new FileInfo(archive).Length;
+                    UpstreamTrust.ParseRelease(CoreMetadata("1.10.4",hash,size));File.Copy(archive,Path.Combine(store.Current,UpstreamTrust.ArchiveName));File.WriteAllText(Path.Combine(store.Current,UpstreamTrust.ReceiptName),new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(new{version="1.10.4",archive_sha256=hash,archive_size=size}));
+                }
+                for(int kind=0;kind<3;kind++){DomainLists.Write(store.Current,kind,kind==2?"192.0.2.0/24":"first.example");DomainLists.Write(store.Current,kind,kind==2?"198.51.100.0/24":"second.example");}
+                Trust.VerifyEngine(store.Current);Assert(!Trust.Mutable("lists/unrelated.txt.bak") && !Trust.Mutable("bin/winws.exe.bak"),"Only the three application-created domain backups are accepted");
+                using(var form=new MainForm(store,false)){
+                    var runner=(EngineRunner)typeof(MainForm).GetField("runner",flags).GetValue(form);runner.ConflictCheck=()=>false;runner.TestStop=()=>{};runner.TestStart=(e,s)=>{};runner.TestSync=(e,s)=>{};runner.TestTelegram=(e,on)=>{};
+                    form.Show();Application.DoEvents();((System.Windows.Forms.Timer)typeof(MainForm).GetField("timer",flags).GetValue(form)).Stop();
+                    var tabs=(DarkTabs)typeof(MainForm).GetField("tabs",flags).GetValue(form);tabs.SelectedIndex=4;var editor=AllControls(form).OfType<DomainEditor>().Single();var input=AllControls(editor).OfType<TextBox>().Single(x=>x.Name=="site-input");var add=AllControls(editor).OfType<Button>().Single(x=>x.Text=="Добавить");
+                    foreach(bool connected in new[]{false,true}){
+                        if(connected)runner.Start(store.Current,store.Settings.Strategy);
+                        typeof(MainForm).GetMethod("RefreshState",flags).Invoke(form,null);
+                        Func<bool> ignoredWarning=()=>AllControls(editor).OfType<Label>().Any(x=>x.Text.Contains("сейчас не обрабатываются"));
+                        Assert(!ignoredWarning(),"Existing domains alone do not show the restricted-scope warning");
+                        foreach(string value in new[]{"https://rutracker.org","https://rutracker.org/","rutracker.org","https://rutracker.org/forum/index.php"}){
+                            DomainLists.Write(store.Current,0,"");editor.Discard();
+                            editor.TextEditor.Text="";input.Text=value;add.PerformClick();Application.DoEvents();Assert(editor.TextEditor.Text.Trim()=="rutracker.org" && editor.Dirty && !form.IsDisposed,"Rutracker URL adds through real UI without closing the form: "+value+"; connected="+connected);
+                            Assert(ignoredWarning()==connected,"Ignored-sites hint appears only after adding a site to a running restricted bypass");
+                            SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());Pump((Task)typeof(MainForm).GetMethod("SaveDomains",flags).Invoke(form,new object[]{0,editor.TextEditor.Text}));
+                            Assert(DomainLists.Read(store.Current,0).Trim()=="rutracker.org" && !editor.Dirty && !form.IsDisposed,"Rutracker saves and reapplies without closing the form; connected="+connected);
+                            Trust.VerifyEngine(store.Current);Assert(!connected || runner.Running,"Saved domain backup does not block verification or restart");
+                            Assert(ignoredWarning()==connected,"Saving preserves the relevant hint without showing it for a stopped bypass");
+                            input.Text=value;add.PerformClick();Application.DoEvents();Assert(!editor.Dirty && !form.IsDisposed,"Duplicate Rutracker address stays a recoverable inline error");
+                        }
+                    }
+                    store.Settings.StrictScope=false;typeof(MainForm).GetMethod("RefreshState",flags).Invoke(form,null);input.Text="another.example";add.PerformClick();Application.DoEvents();Assert(!AllControls(editor).OfType<Label>().Any(x=>x.Text.Contains("сейчас не обрабатываются")),"Unrestricted bypass does not show an ignored-sites warning");editor.Discard();
+                    runner.Stop();typeof(MainForm).GetMethod("Exit",flags).Invoke(form,null);
+                }
+            }finally{StartupService.TestRead=previousStartup;StartupRegistration.TestRead=previousRegistration;NetworkFootprint.TestRead=previousFootprint;ServiceChecks.TestRun=previousProbe;RemoveFixture(folder);}
+        }
         static void FootprintRepairTests(){
             string own=Path.Combine(HostWire.ProtectedRoot,"startup-"+new string('a',32),"bin","winws.exe");
             Assert(NetworkFootprint.OwnImage("\""+own+"\" --wf-tcp=443"),"Own startup snapshot is recognized independently of the GUI installation folder");

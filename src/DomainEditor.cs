@@ -20,7 +20,7 @@ namespace ZapretDesktop {
         readonly Label title,description,status,hint;readonly DarkSelect list;
         readonly DarkEditor text;readonly SiteEntries entries;readonly TextBox input;readonly SurfacePanel inputFrame;
         readonly Button save,discard,add,advanced;string engine,baseline="";
-        int loaded;bool loading,editingText;bool allowed=true;
+        int loaded;bool loading,editingText,connected,restricted,addedWhileRestricted;bool allowed=true;
         public event Action<int,string> SaveRequested;
         public bool Dirty{get{return text.Editor.Text!=baseline;}}
         public DomainEditor(){
@@ -29,7 +29,7 @@ namespace ZapretDesktop {
             description=Theme.Label("Настройка обработки трафика отдельных сайтов.\nIP и страна не меняются; ограничения самого сервиса не снимаются.",10);description.ForeColor=Theme.Muted;
             list=new DarkSelect();list.Items.AddRange(new object[]{"Обрабатывать эти сайты","Не обрабатывать эти сайты","IP-исключения · дополнительно"});list.SelectedIndex=0;list.SelectedIndexChanged+=(s,e)=>ChangeList();
             text=new DarkEditor{Visible=false};entries=new SiteEntries();
-            text.Editor.TextChanged+=(s,e)=>{entries.SetEntries(text.Editor.Text);if(!loading){status.Text=Dirty?"Нажмите «Сохранить», чтобы применить изменения":"";status.ForeColor=Theme.Muted;RefreshSave();}};
+            text.Editor.TextChanged+=(s,e)=>{entries.SetEntries(text.Editor.Text);if(!loading){if(loaded==0 && connected && restricted){var saved=baseline.Replace("\r","").Split('\n').Select(x=>x.Trim());addedWhileRestricted=text.Editor.Text.Replace("\r","").Split('\n').Select(x=>x.Trim()).Any(x=>x.Length>0 && !x.StartsWith("#") && !saved.Contains(x,StringComparer.OrdinalIgnoreCase));}status.Text=Dirty?"Нажмите «Сохранить», чтобы применить изменения":"";status.ForeColor=Theme.Muted;RefreshSave();UpdateExplanation();}};
             inputFrame=new SurfacePanel{BackColor=Theme.Input,Padding=Padding.Empty};input=new TextBox{Name="site-input",BackColor=Theme.Input,ForeColor=Theme.Text,BorderStyle=BorderStyle.None,Font=new Font("Segoe UI",11)};inputFrame.Controls.Add(input);inputFrame.Resize+=(s,e)=>input.SetBounds(S(12),Math.Max(0,(inputFrame.Height-input.PreferredHeight)/2),Math.Max(1,inputFrame.Width-S(24)),input.PreferredHeight);
             input.KeyDown+=(s,e)=>{if(e.KeyCode==Keys.Enter){AddSite();e.SuppressKeyPress=true;}};
             add=Theme.Button("Добавить",true);add.Click+=(s,e)=>AddSite();
@@ -45,15 +45,17 @@ namespace ZapretDesktop {
         public void LoadEngine(string path){engine=path;loading=true;loaded=Math.Max(0,list.SelectedIndex);text.Editor.Text=DomainLists.Read(path,loaded);baseline=text.Editor.Text;loading=false;status.Text="";entries.SetEntries(text.Editor.Text);RefreshSave();UpdateExplanation();}
         void UpdateExplanation(){
             description.Text=loaded==0?"Настройка обработки трафика отдельных сайтов.\nIP и страна не меняются; ограничения самого сервиса не снимаются.":loaded==1?"Исключите сайт из обработки, если она мешает его работе.":"Дополнительные исключения по IP. Если не уверены, оставьте список пустым.";
+            bool ignored=loaded==0 && connected && restricted && addedWhileRestricted;description.ForeColor=ignored?Theme.Warning:Theme.Muted;
+            if(ignored)description.Text="Добавленные сайты сохраняются, но сейчас не обрабатываются.\nОстановите zapret и отключите ограничение сервисов в «Настройки», чтобы применить их.";
             hint.Text=loaded==2?"Введите IP-адрес или сеть, например 192.168.1.0/24.":"Введите адрес сайта, например example.com, и нажмите «Добавить».";
             entries.EmptyText=loaded==0?"Своих правил пока нет.\nДля YouTube и Discord добавлять ничего не нужно.":"Исключений пока нет.\nДобавлять их необязательно.";entries.Invalidate();
         }
         void ChangeList(){if(engine==null || loading)return;if(Dirty){loading=true;list.SelectedIndex=loaded;loading=false;status.Text="Сначала сохраните или отмените изменения.";return;}loaded=list.SelectedIndex;input.Clear();LoadEngine(engine);}
         public void Saved(){LoadEngine(engine);status.Text="Сохранено";status.ForeColor=Theme.Success;}
-        public void SetAllowed(bool canSave,bool connected){allowed=canSave;text.Editor.ReadOnly=!canSave;list.Enabled=input.Enabled=add.Enabled=entries.Enabled=canSave;save.Text=connected?"Сохранить и применить":"Сохранить";RefreshSave();}
+        public void SetAllowed(bool canSave,bool connected,bool restricted=false){allowed=canSave;this.connected=connected;this.restricted=restricted;if(!connected || !restricted)addedWhileRestricted=false;text.Editor.ReadOnly=!canSave;list.Enabled=input.Enabled=add.Enabled=entries.Enabled=canSave;save.Text=connected?"Сохранить и применить":"Сохранить";RefreshSave();UpdateExplanation();}
         void RefreshSave(){save.Enabled=allowed && Dirty;discard.Enabled=allowed && Dirty;}
         public void SetError(string message){status.Text=message;status.ForeColor=Theme.Danger;}
-        public void Discard(){LoadEngine(engine);}
+        public void Discard(){addedWhileRestricted=false;LoadEngine(engine);}
         public TextBox TextEditor{get{return text.Editor;}}
         protected override void OnLayout(LayoutEventArgs e){
             base.OnLayout(e);if(title==null)return;
